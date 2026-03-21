@@ -21,7 +21,6 @@ const DRILL_CONFIG = {
 
 const SIMULATION_DURATION_MS = 10000;
 const PROGRESS_TICK_MS = 100;
-
 const DEFAULT_BATTLE_STATE = {
   appStatus: "running",
   dbStatus: "running",
@@ -29,6 +28,7 @@ const DEFAULT_BATTLE_STATE = {
   errorCount: "0",
   p95Latency: "120ms",
   firstFailure: "--",
+  mcpActivity: [],
   progressPercent: 0,
   statusText: "Drill in progress...",
   timeline: [
@@ -105,17 +105,21 @@ let currentPlan = null;
 let currentDrillId = null;
 let battleState = cloneBattleState(DEFAULT_BATTLE_STATE);
 let verdictState = null;
+let actionPlanState = null;
 let simulationTimeoutIds = [];
 let progressIntervalId = null;
 let drillStatusPollingId = null;
 let simulationActive = false;
 let resetInProgress = false;
 let battleStartedAt = null;
+let verdictTransitionInFlight = false;
+let battleCompleted = false;
 
 function cloneBattleState(state) {
   return {
     ...state,
-    timeline: state.timeline.map((event) => ({ ...event }))
+    timeline: state.timeline.map((event) => ({ ...event })),
+    mcpActivity: [...state.mcpActivity]
   };
 }
 
@@ -264,11 +268,139 @@ function resetBattleState() {
   stopDrillStatusPolling();
   simulationActive = false;
   battleStartedAt = null;
+  verdictTransitionInFlight = false;
+  battleCompleted = false;
   battleState = cloneBattleState(DEFAULT_BATTLE_STATE);
   verdictState = null;
+  actionPlanState = null;
   renderBattleState();
+  setViewVerdictButtonVisible(false);
   resetEvidencePanel();
   console.log("[WARROOM] battle state reset");
+}
+
+function setViewVerdictButtonVisible(isVisible) {
+  const viewVerdictButton = document.getElementById("viewVerdictButton");
+  if (!viewVerdictButton) {
+    return;
+  }
+
+  viewVerdictButton.classList.toggle("hidden", !isVisible);
+}
+
+function formatServiceStatusLabel(status) {
+  const successRateValue = Number.parseInt(battleState.successRate, 10);
+
+  if (status === "stopped") {
+    return "Offline";
+  }
+
+  if (status === "degraded") {
+    if (!Number.isNaN(successRateValue) && successRateValue === 0) {
+      return "Not working";
+    }
+
+    if (!Number.isNaN(successRateValue) && successRateValue < 50) {
+      return "Mostly failing";
+    }
+
+    return "Partially working";
+  }
+
+  return "Running";
+}
+
+function humanizeTimelineText(text) {
+  if (/drill started/i.test(text)) {
+    return "Simulation started";
+  }
+
+  if (/warroom-db stopped/i.test(text)) {
+    return "Database went offline";
+  }
+
+  if (/first 5xx response/i.test(text)) {
+    return "First checkout error appeared";
+  }
+
+  if (/error rate increasing/i.test(text) || /5xx errors increasing/i.test(text)) {
+    return "Failures increased";
+  }
+
+  if (/drill complete/i.test(text)) {
+    return "Simulation completed";
+  }
+
+  return text;
+}
+
+function buildBattleSummaryLines() {
+  const successRateValue = Number.parseInt(battleState.successRate, 10);
+  const lines = [];
+
+  if (battleState.dbStatus === "stopped") {
+    lines.push("The database is offline.");
+  } else if (battleState.dbStatus === "degraded") {
+    lines.push("The database is unstable and responding slowly.");
+  } else {
+    lines.push("The database is still responding.");
+  }
+
+  if (battleState.appStatus === "degraded") {
+    lines.push("The app is still up, but checkout is only partially working.");
+  } else {
+    lines.push("The app is still running and serving traffic.");
+  }
+
+  if (Number.parseInt(battleState.errorCount, 10) === 0) {
+    lines.push("No checkout failures have been observed yet.");
+  } else if (successRateValue === 0) {
+    lines.push("All tested checkout requests are currently failing.");
+  } else if (!Number.isNaN(successRateValue)) {
+    lines.push(`${100 - successRateValue}% of tested requests are now failing.`);
+  } else {
+    lines.push(`${battleState.errorCount} checkout requests have failed so far.`);
+  }
+
+  return lines;
+}
+
+function renderBattleSummary() {
+  const battleSummaryList = document.getElementById("battleSummaryList");
+  const lines = buildBattleSummaryLines();
+
+  battleSummaryList.innerHTML = lines
+    .map((line) => `<li>${line}</li>`)
+    .join("");
+}
+
+function renderEnvironmentInfo() {
+  const serviceCount = document.querySelectorAll(".service-card").length;
+  document.getElementById("environmentContainerCount").textContent = `${serviceCount} monitored`;
+}
+
+function getAppServiceCopy(status) {
+  if (status === "stopped") {
+    return "Checkout requests are failing because the app cannot reach the database.";
+  }
+
+  if (status === "degraded") {
+    return "The app is still running, but checkout is unstable and some requests are failing.";
+  }
+
+  return "The app is running normally and still serving requests.";
+}
+
+function getDbServiceCopy(status) {
+  if (status === "stopped") {
+    return "The database is offline, so checkout cannot read or write order data.";
+  }
+
+  if (status === "degraded") {
+    return "The database is responding slowly, which is delaying checkout.";
+  }
+
+  return "The database is online and responding normally.";
 }
 
 function setStatusAppearance(servicePrefix, status) {
@@ -295,7 +427,7 @@ function setStatusAppearance(servicePrefix, status) {
     card.classList.add("service-card-running");
   }
 
-  text.textContent = status;
+  text.textContent = formatServiceStatusLabel(status);
 }
 
 function renderTimeline(events) {
@@ -310,6 +442,29 @@ function renderTimeline(events) {
     .join("");
 }
 
+function renderMcpActivity(items) {
+  const mcpActivityList = document.getElementById("mcpActivityList");
+  const normalizedItems = [...items]
+    .reverse()
+    .map((item) => item.replace(/^MCP /, ""));
+  const fallbackItems = currentPlan?.drillType === "db_down"
+    ? [
+        "Initializing failure simulation",
+        "Preparing container control",
+        "Monitoring database and app state"
+      ]
+    : [
+        "Monitoring system behavior",
+        "Collecting live metrics",
+        "Analyzing service health"
+      ];
+  const renderedItems = normalizedItems.length ? normalizedItems : fallbackItems;
+
+  mcpActivityList.innerHTML = renderedItems
+    .map((item) => `<li class="mcp-activity-item">${item}</li>`)
+    .join("");
+}
+
 function renderBattleState() {
   setStatusAppearance("app", battleState.appStatus);
   setStatusAppearance("db", battleState.dbStatus);
@@ -318,6 +473,8 @@ function renderBattleState() {
   document.getElementById("errorCount").textContent = battleState.errorCount;
   document.getElementById("p95Latency").textContent = battleState.p95Latency;
   document.getElementById("firstFailure").textContent = battleState.firstFailure;
+  document.getElementById("appServiceCopy").textContent = getAppServiceCopy(battleState.appStatus);
+  document.getElementById("dbServiceCopy").textContent = getDbServiceCopy(battleState.dbStatus);
   document.getElementById("progressBar").style.width = `${battleState.progressPercent}%`;
   document.getElementById("drillStatusText").textContent = battleState.statusText;
   document.getElementById("errorCountCard").classList.toggle(
@@ -330,6 +487,9 @@ function renderBattleState() {
   );
 
   renderTimeline(battleState.timeline);
+  renderMcpActivity(battleState.mcpActivity);
+  renderBattleSummary();
+  renderEnvironmentInfo();
 }
 
 function applyDrillStatus(statusData) {
@@ -337,7 +497,7 @@ function applyDrillStatus(statusData) {
     const [time, ...rest] = entry.split(" - ");
     return {
       time,
-      text: rest.join(" - ")
+      text: humanizeTimelineText(rest.join(" - "))
     };
   });
 
@@ -349,13 +509,14 @@ function applyDrillStatus(statusData) {
   battleState.firstFailure = statusData.first_failure_time === null
     ? "--"
     : `00:${String(statusData.first_failure_time).padStart(2, "0")}`;
+  battleState.mcpActivity = statusData.mcp_activity || [];
   battleState.timeline = timelineEvents;
   battleState.progressPercent = statusData.status === "complete"
     ? 100
     : battleState.progressPercent;
   battleState.statusText = statusData.status === "complete"
-    ? "Drill complete. Preparing verdict..."
-    : "Drill in progress...";
+    ? "Simulation complete. Review what changed, then view the verdict."
+    : "Simulation in progress...";
 
   renderBattleState();
 }
@@ -373,6 +534,20 @@ async function fetchDrillEvidence() {
 
   console.log("[WARROOM] evidence fetch success", data);
 
+  return data;
+}
+
+async function fetchActionPlan() {
+  console.log("[WARROOM] action plan fetch start");
+
+  const response = await fetch("http://127.0.0.1:8000/drill/action-plan");
+
+  if (!response.ok) {
+    throw new Error(`Action plan request failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+  console.log("[WARROOM] action plan fetch success", data);
   return data;
 }
 
@@ -412,13 +587,14 @@ function buildVerdictState(evidenceData) {
 
   return {
     result: "FAIL",
-    summary: "The system did not handle the dependency failure safely.",
+    summary: evidenceData.summary || "The system did not handle the dependency failure safely.",
     successRate: `${evidenceData.success_rate}%`,
     p95Latency: `${evidenceData.p95_latency}ms`,
     errorCount: String(evidenceData.error_count),
     firstFailure,
     likelyCause: evidenceData.likely_cause,
     suggestedFix: evidenceData.suggested_fix,
+    nextActions: buildNextActions(evidenceData),
     evidence: {
       timelineLines,
       logLines: evidenceData.logs,
@@ -430,6 +606,28 @@ function buildVerdictState(evidenceData) {
       ]
     }
   };
+}
+
+function buildNextActions(evidenceData) {
+  const reasoningText = [
+    evidenceData.likely_cause || "",
+    evidenceData.suggested_fix || "",
+    evidenceData.summary || ""
+  ].join(" ").toLowerCase();
+
+  if ((currentPlan && currentPlan.drillType === "db_down") || reasoningText.includes("database")) {
+    return [
+      "Restore database availability and confirm checkout can complete again.",
+      "Add fallback behavior so checkout fails gracefully when the database is unreachable.",
+      "Add retry or circuit-breaker protection around database calls in the checkout path."
+    ];
+  }
+
+  return [
+    "Restore the failing dependency or traffic path and confirm the app recovers.",
+    "Add graceful fallback behavior for the impacted user flow.",
+    "Add protection such as retries, timeouts, or circuit breakers around the weak dependency."
+  ];
 }
 
 function populateVerdictScreen() {
@@ -445,20 +643,47 @@ function populateVerdictScreen() {
   document.getElementById("verdictFirstFailure").textContent = verdictState.firstFailure;
   document.getElementById("likelyCause").textContent = verdictState.likelyCause;
   document.getElementById("suggestedFix").textContent = verdictState.suggestedFix;
+  document.getElementById("nextActionsList").innerHTML = verdictState.nextActions
+    .map((action) => `<li>${action}</li>`)
+    .join("");
   document.getElementById("evidenceTimeline").textContent = verdictState.evidence.timelineLines.join("\n");
   document.getElementById("evidenceLogs").textContent = verdictState.evidence.logLines.join("\n");
   document.getElementById("evidenceMetrics").textContent = verdictState.evidence.metricsSnapshot.join("\n");
   resetEvidencePanel();
 }
 
+function populateActionPlanScreen() {
+  if (!actionPlanState) {
+    return;
+  }
+
+  document.getElementById("actionPlanDoNow").innerHTML = actionPlanState.do_now
+    .map((item) => `<li>${item}</li>`)
+    .join("");
+  document.getElementById("actionPlanFixInCode").innerHTML = actionPlanState.fix_in_code
+    .map((item) => `<li>${item}</li>`)
+    .join("");
+  document.getElementById("actionPlanImproveLater").innerHTML = actionPlanState.improve_later
+    .map((item) => `<li>${item}</li>`)
+    .join("");
+}
+
 async function showVerdictScreen() {
+  if (verdictTransitionInFlight) {
+    return;
+  }
+
+  verdictTransitionInFlight = true;
+
   try {
+    console.log("[WARROOM] verdict transition triggered");
     const evidenceData = await fetchDrillEvidence();
     verdictState = buildVerdictState(evidenceData);
     populateVerdictScreen();
     showScreen("screen4");
     console.log("[WARROOM] transition to verdict screen");
   } catch (error) {
+    verdictTransitionInFlight = false;
     console.error("[WARROOM] evidence fetch failure", error);
     alert("Could not load verdict evidence. Please make sure the backend is running.");
   }
@@ -484,7 +709,13 @@ async function pollDrillStatus() {
 
     if (statusData.status === "complete") {
       stopDrillStatusPolling();
-      await showVerdictScreen();
+      if (!battleCompleted) {
+        battleCompleted = true;
+        battleState.progressPercent = 100;
+        renderBattleState();
+        setViewVerdictButtonVisible(true);
+        console.log("[WARROOM] battle screen completed, waiting for manual verdict");
+      }
     }
   } catch (error) {
     console.error("[WARROOM] drill status polling failed", error);
@@ -501,11 +732,20 @@ function parseDurationSeconds(durationText) {
 function startProgressAnimation() {
   const durationSeconds = parseDurationSeconds(currentPlan?.duration || "60 seconds");
   battleStartedAt = Date.now();
+  console.log("[WARROOM] battle screen started");
   battleState.progressPercent = 0;
   renderBattleState();
 
   progressIntervalId = window.setInterval(() => {
     if (!battleStartedAt) {
+      return;
+    }
+
+    if (battleCompleted || battleState.progressPercent >= 100) {
+      battleState.progressPercent = 100;
+      document.getElementById("progressBar").style.width = "100%";
+      clearInterval(progressIntervalId);
+      progressIntervalId = null;
       return;
     }
 
@@ -533,6 +773,37 @@ function startDrillStatusPolling() {
   startProgressAnimation();
   pollDrillStatus();
   drillStatusPollingId = window.setInterval(pollDrillStatus, 1000);
+}
+
+function viewVerdict() {
+  if (!battleCompleted || verdictTransitionInFlight) {
+    return;
+  }
+
+  console.log("[WARROOM] view verdict clicked");
+  void showVerdictScreen();
+}
+
+function backToSimulation() {
+  console.log("[WARROOM] back to simulation clicked");
+  showScreen("screen3");
+  renderBattleState();
+}
+
+async function showActionPlan() {
+  try {
+    const data = await fetchActionPlan();
+    actionPlanState = data;
+    populateActionPlanScreen();
+    showScreen("screen5");
+  } catch (error) {
+    console.error("[WARROOM] action plan fetch failure", error);
+    alert("Could not load action plan. Please make sure the backend is running.");
+  }
+}
+
+function backToVerdict() {
+  showScreen("screen4");
 }
 
 async function approveRun() {

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 app = FastAPI(title="WARROOM Backend")
 APP_BASE_URL = "http://127.0.0.1:5001"
+MCP_BASE_URL = "http://127.0.0.1:9100"
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,6 +29,8 @@ class ClassifyRequest(BaseModel):
 
 class StartDrillRequest(BaseModel):
     drill_type: Literal["db_down", "latency_spike", "request_flood"]
+    duration: str | None = None
+    intensity: str | None = None
 
 
 DRILL_CONFIG = {
@@ -69,6 +72,7 @@ DRILL_STATE = {
     "error_count": 0,
     "db_stop_time": None,
     "first_failure_time": None,
+    "mcp_activity": [],
     "evidence": None,
 }
 
@@ -88,6 +92,7 @@ def reset_drill_state() -> None:
     DRILL_STATE["error_count"] = 0
     DRILL_STATE["db_stop_time"] = None
     DRILL_STATE["first_failure_time"] = None
+    DRILL_STATE["mcp_activity"] = []
     DRILL_STATE["evidence"] = None
 
 
@@ -98,6 +103,32 @@ def run_podman_command(*args: str) -> subprocess.CompletedProcess:
         text=True,
         check=False,
     )
+
+
+def call_mcp_tool(tool_name: str, payload: dict) -> dict:
+    print(f"[WARROOM backend] calling MCP tool {tool_name}")
+    try:
+        response = requests.post(
+            f"{MCP_BASE_URL}/tools/{tool_name}",
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"MCP tool {tool_name} failed: {exc}",
+        ) from exc
+
+    data = response.json()
+    if not data.get("ok", False):
+        raise HTTPException(
+            status_code=502,
+            detail=f"MCP tool {tool_name} returned an unsuccessful response.",
+        )
+
+    print(f"[WARROOM backend] MCP {tool_name} success")
+    return data
 
 
 def resolve_db_container_name() -> str:
@@ -467,6 +498,99 @@ def generate_ollama_verdict(evidence_input: dict) -> dict:
     }
 
 
+def build_fallback_action_plan(evidence: dict) -> dict:
+    reasoning_text = " ".join(
+        [
+            evidence.get("likely_cause", ""),
+            evidence.get("suggested_fix", ""),
+            evidence.get("summary", ""),
+        ]
+    ).lower()
+
+    if DRILL_STATE["drill_type"] == "db_down" or "database" in reasoning_text:
+        return {
+            "do_now": [
+                "Restore database availability and confirm checkout requests recover.",
+                "Pause any risky traffic or drill actions until the app is stable again.",
+                "Verify that new checkout failures stop after the database comes back.",
+            ],
+            "fix_in_code": [
+                "Add graceful fallback behavior when the database is unreachable.",
+                "Add retry protection with limits around checkout database calls.",
+                "Introduce circuit-breaker behavior so dependency failure does not cascade immediately.",
+            ],
+            "improve_later": [
+                "Add automated dependency failure tests for the checkout path.",
+                "Improve health checks and alerting around database reachability.",
+                "Document a recovery playbook for database outage scenarios.",
+            ],
+        }
+
+    return {
+        "do_now": [
+            "Stabilize the affected service and confirm customer-facing failures stop.",
+            "Review the captured evidence and identify the weakest dependency in the flow.",
+            "Communicate current impact and recovery status to the team.",
+        ],
+        "fix_in_code": [
+            "Add defensive handling around the failing path so errors degrade more safely.",
+            "Add retries, timeouts, or circuit-breaker protection where the evidence shows weakness.",
+            "Cover the failure path with an automated resilience test.",
+        ],
+        "improve_later": [
+            "Add clearer runbooks and alerts for this class of failure.",
+            "Track user-facing error rate and recovery time after dependency incidents.",
+            "Run the same drill regularly to verify the fix stays effective.",
+        ],
+    }
+
+
+def generate_ollama_action_plan(action_plan_input: dict) -> dict:
+    print("[WARROOM backend] starting Ollama action plan generation")
+
+    prompt = (
+        "You are generating an action plan after a resilience drill.\n"
+        "Use only the provided evidence.\n"
+        "Do not invent facts, systems, or metrics.\n"
+        "Keep actions practical, concise, and useful for engineers.\n"
+        "Return valid JSON only in this shape:\n"
+        "{\n"
+        '  "do_now": ["...", "...", "..."],\n'
+        '  "fix_in_code": ["...", "...", "..."],\n'
+        '  "improve_later": ["...", "...", "..."]\n'
+        "}\n"
+        "Each item should be one short action.\n\n"
+        f"Evidence:\n{json.dumps(action_plan_input, indent=2)}"
+    )
+
+    response = requests.post(
+        "http://127.0.0.1:11434/api/generate",
+        json={
+            "model": "llama3",
+            "stream": False,
+            "prompt": prompt,
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    response_data = response.json()
+    raw_text = response_data.get("response", "").strip()
+
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    action_plan = json.loads(raw_text)
+    print("[WARROOM backend] Ollama action plan success")
+    return {
+        "do_now": action_plan["do_now"][:3],
+        "fix_in_code": action_plan["fix_in_code"][:3],
+        "improve_later": action_plan["improve_later"][:3],
+    }
+
+
 def wait_for_demo_health(timeout_seconds: int = 15) -> None:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
@@ -746,14 +870,23 @@ def start_drill(request: StartDrillRequest):
     DRILL_STATE["start_time"] = time.time()
 
     if request.drill_type == "db_down":
-        container_name = resolve_db_container_name()
-        DRILL_STATE["db_container_name"] = container_name
+        result = call_mcp_tool(
+            "run_drill",
+            {
+                "drill_type": request.drill_type,
+                "duration": request.duration,
+                "intensity": request.intensity,
+            },
+        )
+        DRILL_STATE["db_container_name"] = result.get("container")
+        DRILL_STATE["mcp_activity"] = result.get("mcp_activity", [])
+        DRILL_STATE["mcp_activity"].append("MCP monitoring active")
+        DRILL_STATE["mcp_activity"] = DRILL_STATE["mcp_activity"][-8:]
         DRILL_STATE["timeline"] = ["00:00 - Drill started"]
-        stop_container(container_name)
         print(
             f"[WARROOM backend] drill start "
             f"drill_id={drill_id} drill_type={request.drill_type} "
-            f"container={container_name}"
+            f"container={DRILL_STATE['db_container_name']}"
         )
     else:
         DRILL_STATE["evidence"] = build_evidence(request.drill_type)
@@ -782,6 +915,7 @@ def drill_status():
             "p95_latency": 120,
             "first_failure_time": None,
             "timeline": [],
+            "mcp_activity": [],
         }
 
     if DRILL_STATE["status"] == "running":
@@ -816,6 +950,7 @@ def drill_status():
     return {
         "drill_id": DRILL_STATE["drill_id"],
         "status": DRILL_STATE["status"],
+        "mcp_activity": DRILL_STATE["mcp_activity"],
         **snapshot,
     }
 
@@ -860,17 +995,56 @@ def drill_evidence():
     return DRILL_STATE["evidence"]
 
 
+@app.get("/drill/action-plan")
+def drill_action_plan():
+    print(
+        f"[WARROOM backend] GET /drill/action-plan "
+        f"drill_id={DRILL_STATE['drill_id']} status={DRILL_STATE['status']}"
+    )
+
+    if DRILL_STATE["drill_type"] == "db_down" and DRILL_STATE["status"] != "idle":
+        evidence = DRILL_STATE["evidence"] or build_real_db_down_evidence()
+    else:
+        evidence = DRILL_STATE["evidence"] or build_evidence(
+            DRILL_STATE["drill_type"] or "db_down"
+        )
+
+    action_plan_input = {
+        "drill_type": DRILL_STATE["drill_type"] or "db_down",
+        "likely_cause": evidence.get("likely_cause"),
+        "suggested_fix": evidence.get("suggested_fix"),
+        "summary": evidence.get("summary"),
+        "success_rate": evidence.get("success_rate"),
+        "error_count": evidence.get("error_count"),
+        "p95_latency": evidence.get("p95_latency"),
+        "first_failure_time": evidence.get("first_failure_time"),
+        "logs": evidence.get("logs", []),
+        "timeline": list(DRILL_STATE["timeline"]),
+    }
+
+    try:
+        return generate_ollama_action_plan(action_plan_input)
+    except Exception as exc:
+        print(f"[WARROOM backend] Ollama action plan fallback: {exc}")
+        return build_fallback_action_plan(evidence)
+
+
 @app.post("/drill/reset")
 def reset_drill():
     print(f"[WARROOM backend] POST /drill/reset drill_id={DRILL_STATE['drill_id']}")
 
     if DRILL_STATE["drill_type"] == "db_down":
-        container_name = DRILL_STATE["db_container_name"] or resolve_db_container_name()
-        start_container(container_name)
-        wait_for_demo_health()
+        result = call_mcp_tool(
+            "reset",
+            {
+                "drill_id": DRILL_STATE["drill_id"],
+            },
+        )
+        DRILL_STATE["mcp_activity"] = result.get("mcp_activity", DRILL_STATE["mcp_activity"])
         print(
             f"[WARROOM backend] reset success "
-            f"drill_id={DRILL_STATE['drill_id']} container={container_name}"
+            f"drill_id={DRILL_STATE['drill_id']} "
+            f"container={result.get('container')}"
         )
 
     reset_drill_state()
