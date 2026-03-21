@@ -1,0 +1,89 @@
+services:
+  warroom-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: warroom
+      POSTGRES_PASSWORD: warroom
+      POSTGRES_DB: warroom
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warroom"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - warroom-db-data:/var/lib/postgresql
+    networks:
+      - warroom-net
+
+  warroom-toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    ports:
+      - "8474:8474"
+      - "5433:5433"
+    depends_on:
+      - warroom-db
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8474/version || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - warroom-net
+
+  warroom-app:
+    build:
+      context: ./demo-app
+      dockerfile: Containerfile
+    environment:
+      POSTGRES_HOST: warroom-toxiproxy
+      POSTGRES_PORT: "5433"
+      POSTGRES_USER: warroom
+      POSTGRES_PASSWORD: warroom
+      POSTGRES_DB: warroom
+    ports:
+      - "5000:5000"
+    depends_on:
+      - warroom-toxiproxy-setup
+      - warroom-db
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - warroom-net
+
+  warroom-backend:
+    image: python:3.11-slim
+    command: ["sh", "-c", "echo \"backend placeholder - Member A will replace\""]
+    ports:
+      - "8000:8000"
+    networks:
+      - warroom-net
+
+  warroom-mcp:
+    image: python:3.11-slim
+    command: ["sh", "-c", "echo \"mcp placeholder - Member A will replace\""]
+    networks:
+      - warroom-net
+
+  warroom-toxiproxy-setup:
+    image: curlimages/curl:latest
+    depends_on:
+      - warroom-toxiproxy
+      - warroom-db
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        sleep 3
+        curl -s -X POST http://warroom-toxiproxy:8474/proxies -H "Content-Type: application/json" -d '{"name":"warroom-db-proxy","listen":"0.0.0.0:5433","upstream":"warroom-db:5432","enabled":true}'
+    networks:
+      - warroom-net
+
+networks:
+  warroom-net:
+
+volumes:
+  warroom-db-data:
