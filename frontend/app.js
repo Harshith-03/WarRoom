@@ -109,6 +109,8 @@ let simulationTimeoutIds = [];
 let progressIntervalId = null;
 let drillStatusPollingId = null;
 let simulationActive = false;
+let resetInProgress = false;
+let battleStartedAt = null;
 
 function cloneBattleState(state) {
   return {
@@ -150,15 +152,19 @@ async function classifyFear(fear) {
   };
 }
 
-async function startDrillRequest(drillType) {
-  console.log("[WARROOM] drill start request started", { drillType });
+async function startDrillRequest(drillType, duration, intensity) {
+  console.log("[WARROOM] drill start request started", { drillType, duration, intensity });
 
   const response = await fetch("http://127.0.0.1:8000/drill/start", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({ drill_type: drillType })
+    body: JSON.stringify({
+      drill_type: drillType,
+      duration,
+      intensity
+    })
   });
 
   if (!response.ok) {
@@ -182,11 +188,20 @@ function showScreen(screenToShowId) {
   console.log("[WARROOM] screen transition:", screenToShowId);
 }
 
+function updateApprovalHelper() {
+  const duration = document.getElementById("durationSelect").value;
+  const intensity = document.getElementById("intensitySelect").value;
+  document.getElementById("approvalHelper").textContent =
+    `This drill will run for ${duration} at ${intensity} intensity.`;
+}
+
 function populateApprovalScreen(plan) {
   document.getElementById("drillType").textContent = plan.label;
   document.getElementById("targetService").textContent = plan.targetService;
-  document.getElementById("duration").textContent = plan.duration;
+  document.getElementById("durationSelect").value = plan.duration;
+  document.getElementById("intensitySelect").value = "Medium";
   document.getElementById("impact").textContent = plan.impact;
+  updateApprovalHelper();
 }
 
 async function runDrill() {
@@ -248,6 +263,7 @@ function resetBattleState() {
   clearSimulationTimers();
   stopDrillStatusPolling();
   simulationActive = false;
+  battleStartedAt = null;
   battleState = cloneBattleState(DEFAULT_BATTLE_STATE);
   verdictState = null;
   renderBattleState();
@@ -259,19 +275,24 @@ function setStatusAppearance(servicePrefix, status) {
   const dot = document.getElementById(`${servicePrefix}StatusDot`);
   const text = document.getElementById(`${servicePrefix}StatusText`);
   const pill = document.getElementById(`${servicePrefix}StatusPill`);
+  const card = document.getElementById(`${servicePrefix}ServiceCard`);
 
   dot.className = "status-dot";
   pill.className = "status-pill";
+  card.className = "service-card";
 
   if (status === "stopped") {
     dot.classList.add("status-stopped");
     pill.classList.add("status-pill-stopped");
+    card.classList.add("service-card-stopped");
   } else if (status === "degraded") {
     dot.classList.add("status-degraded");
     pill.classList.add("status-pill-degraded");
+    card.classList.add("service-card-degraded");
   } else {
     dot.classList.add("status-running");
     pill.classList.add("status-pill-running");
+    card.classList.add("service-card-running");
   }
 
   text.textContent = status;
@@ -299,6 +320,14 @@ function renderBattleState() {
   document.getElementById("firstFailure").textContent = battleState.firstFailure;
   document.getElementById("progressBar").style.width = `${battleState.progressPercent}%`;
   document.getElementById("drillStatusText").textContent = battleState.statusText;
+  document.getElementById("errorCountCard").classList.toggle(
+    "metric-card-critical",
+    Number.parseInt(battleState.errorCount, 10) > 0
+  );
+  document.getElementById("successRateCard").classList.toggle(
+    "metric-card-warning",
+    battleState.successRate !== "100%"
+  );
 
   renderTimeline(battleState.timeline);
 }
@@ -323,7 +352,7 @@ function applyDrillStatus(statusData) {
   battleState.timeline = timelineEvents;
   battleState.progressPercent = statusData.status === "complete"
     ? 100
-    : Math.min(timelineEvents.length * 25, 90);
+    : battleState.progressPercent;
   battleState.statusText = statusData.status === "complete"
     ? "Drill complete. Preparing verdict..."
     : "Drill in progress...";
@@ -363,6 +392,16 @@ async function resetDrillRequest() {
   console.log("[WARROOM] reset success", data);
 
   return data;
+}
+
+function setResetButtonState(isBusy) {
+  const resetButton = document.getElementById("resetButton");
+  if (!resetButton) {
+    return;
+  }
+
+  resetButton.disabled = isBusy;
+  resetButton.textContent = isBusy ? "Resetting..." : "Reset & Try Another";
 }
 
 function buildVerdictState(evidenceData) {
@@ -454,6 +493,29 @@ async function pollDrillStatus() {
   }
 }
 
+function parseDurationSeconds(durationText) {
+  const parsed = Number.parseInt(durationText, 10);
+  return Number.isNaN(parsed) ? 60 : parsed;
+}
+
+function startProgressAnimation() {
+  const durationSeconds = parseDurationSeconds(currentPlan?.duration || "60 seconds");
+  battleStartedAt = Date.now();
+  battleState.progressPercent = 0;
+  renderBattleState();
+
+  progressIntervalId = window.setInterval(() => {
+    if (!battleStartedAt) {
+      return;
+    }
+
+    const elapsedMs = Date.now() - battleStartedAt;
+    const percent = Math.min((elapsedMs / (durationSeconds * 1000)) * 100, 99);
+    battleState.progressPercent = percent;
+    document.getElementById("progressBar").style.width = `${percent}%`;
+  }, 100);
+}
+
 function startDrillStatusPolling() {
   if (drillStatusPollingId) {
     return;
@@ -468,6 +530,7 @@ function startDrillStatusPolling() {
     drillType: currentPlan ? currentPlan.drillType : "db_down"
   });
 
+  startProgressAnimation();
   pollDrillStatus();
   drillStatusPollingId = window.setInterval(pollDrillStatus, 1000);
 }
@@ -478,13 +541,31 @@ async function approveRun() {
     return;
   }
 
+  const selectedDuration = document.getElementById("durationSelect").value;
+  const selectedIntensity = document.getElementById("intensitySelect").value;
+
+  currentPlan.duration = selectedDuration;
+  currentPlan.intensity = selectedIntensity;
+
   try {
-    const data = await startDrillRequest(currentPlan.drillType);
+    console.log("[WARROOM] approved drill configuration", {
+      drillType: currentPlan.drillType,
+      duration: selectedDuration,
+      intensity: selectedIntensity
+    });
+
+    const data = await startDrillRequest(
+      currentPlan.drillType,
+      selectedDuration,
+      selectedIntensity
+    );
     currentDrillId = data.drill_id;
 
     console.log("[WARROOM] drill started", {
       drillId: currentDrillId,
-      drillType: currentPlan.drillType
+      drillType: currentPlan.drillType,
+      duration: selectedDuration,
+      intensity: selectedIntensity
     });
 
     startDrillStatusPolling();
@@ -513,19 +594,34 @@ function toggleEvidence() {
 }
 
 async function resetToStart() {
+  if (resetInProgress) {
+    return;
+  }
+
+  console.log("[WARROOM] reset button clicked");
+  resetInProgress = true;
+  setResetButtonState(true);
+
   try {
     await resetDrillRequest();
     currentDrillId = null;
     currentPlan = null;
     resetBattleState();
     showScreen("screen1");
+    console.log("[WARROOM] UI returned to screen 1");
   } catch (error) {
     console.error("[WARROOM] reset failure", error);
     alert("Could not reset drill. Please make sure the backend is running.");
+  } finally {
+    resetInProgress = false;
+    setResetButtonState(false);
   }
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  document.getElementById("durationSelect").addEventListener("change", updateApprovalHelper);
+  document.getElementById("intensitySelect").addEventListener("change", updateApprovalHelper);
+  setResetButtonState(false);
   resetBattleState();
   showScreen("screen1");
   console.log("[WARROOM] initialized");

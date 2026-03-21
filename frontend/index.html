@@ -44,14 +44,30 @@
           <span class="detail-value" id="targetService"></span>
         </div>
         <div class="detail-row">
-          <span class="detail-label">Duration</span>
-          <span class="detail-value" id="duration"></span>
+          <label class="detail-label" for="durationSelect">Duration</label>
+          <select class="approval-select detail-value" id="durationSelect">
+            <option value="30 seconds">30 seconds</option>
+            <option value="60 seconds">60 seconds</option>
+            <option value="90 seconds">90 seconds</option>
+          </select>
+        </div>
+        <div class="detail-row">
+          <label class="detail-label" for="intensitySelect">Intensity</label>
+          <select class="approval-select detail-value" id="intensitySelect">
+            <option value="Low">Low</option>
+            <option value="Medium" selected>Medium</option>
+            <option value="High">High</option>
+          </select>
         </div>
         <div class="detail-row">
           <span class="detail-label">Expected Impact</span>
           <span class="detail-value" id="impact"></span>
         </div>
       </div>
+
+      <p class="approval-helper" id="approvalHelper">
+        This drill will run for 60 seconds at Medium intensity.
+      </p>
 
       <div class="actions">
         <button type="button" class="secondary-button" onclick="goBack()">Cancel</button>
@@ -73,7 +89,7 @@
         <section class="card battle-section">
           <div class="section-heading">Service Status</div>
           <div class="service-grid">
-            <article class="service-card">
+            <article class="service-card" id="appServiceCard">
               <div class="service-card-top">
                 <span class="service-name">warroom-app</span>
                 <span class="status-pill" id="appStatusPill">
@@ -84,7 +100,7 @@
               <p class="service-copy">Application traffic and request handling.</p>
             </article>
 
-            <article class="service-card">
+            <article class="service-card" id="dbServiceCard">
               <div class="service-card-top">
                 <span class="service-name">warroom-db</span>
                 <span class="status-pill" id="dbStatusPill">
@@ -100,11 +116,11 @@
         <section class="card battle-section">
           <div class="section-heading">Live Metrics</div>
           <div class="metrics-grid">
-            <div class="metric-card">
+            <div class="metric-card metric-card-primary" id="successRateCard">
               <span class="metric-label">Success Rate</span>
               <strong class="metric-value" id="successRate">100%</strong>
             </div>
-            <div class="metric-card">
+            <div class="metric-card metric-card-alert" id="errorCountCard">
               <span class="metric-label">Error Count</span>
               <strong class="metric-value" id="errorCount">0</strong>
             </div>
@@ -217,7 +233,7 @@
       </section>
 
       <div class="actions">
-        <button type="button" class="primary-button" onclick="resetToStart()">Reset &amp; Try Another</button>
+        <button type="button" class="primary-button" id="resetButton" onclick="resetToStart()">Reset &amp; Try Another</button>
       </div>
     </section>
   </main>

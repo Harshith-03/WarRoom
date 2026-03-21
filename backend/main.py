@@ -1,3 +1,4 @@
+import json
 import subprocess
 import time
 from typing import Literal
@@ -10,6 +11,7 @@ from pydantic import BaseModel
 
 
 app = FastAPI(title="WARROOM Backend")
+APP_BASE_URL = "http://127.0.0.1:5001"
 
 app.add_middleware(
     CORSMiddleware,
@@ -65,6 +67,7 @@ DRILL_STATE = {
     "success_count": 0,
     "probe_count": 0,
     "error_count": 0,
+    "db_stop_time": None,
     "first_failure_time": None,
     "evidence": None,
 }
@@ -83,6 +86,7 @@ def reset_drill_state() -> None:
     DRILL_STATE["success_count"] = 0
     DRILL_STATE["probe_count"] = 0
     DRILL_STATE["error_count"] = 0
+    DRILL_STATE["db_stop_time"] = None
     DRILL_STATE["first_failure_time"] = None
     DRILL_STATE["evidence"] = None
 
@@ -177,6 +181,8 @@ def latency_p95(latencies_ms: list[float]) -> int:
 
 
 def probe_endpoint(method: str, url: str) -> dict:
+    probe_name = "health" if url.endswith("/health") else "checkout"
+    print(f"[WARROOM backend] probing {probe_name} url={url}")
     started_at = time.perf_counter()
     try:
         response = requests.request(method, url, timeout=2)
@@ -209,8 +215,8 @@ def probe_endpoint(method: str, url: str) -> dict:
 def probe_db_down_status() -> dict:
     container_name = DRILL_STATE["db_container_name"]
     db_running = container_is_running(container_name)
-    health_result = probe_endpoint("GET", "http://127.0.0.1:5000/health")
-    checkout_result = probe_endpoint("POST", "http://127.0.0.1:5000/checkout")
+    health_result = probe_endpoint("GET", f"{APP_BASE_URL}/health")
+    checkout_result = probe_endpoint("POST", f"{APP_BASE_URL}/checkout")
 
     print(f"[WARROOM backend] health check result={health_result}")
     print(f"[WARROOM backend] checkout probe result={checkout_result}")
@@ -224,15 +230,24 @@ def probe_db_down_status() -> dict:
             DRILL_STATE["success_count"] += 1
         else:
             DRILL_STATE["error_count"] += 1
-            if DRILL_STATE["first_failure_time"] is None:
-                DRILL_STATE["first_failure_time"] = max(elapsed_seconds(), 3)
 
     if not db_running:
-        add_timeline_event("00:02 - warroom-db stopped")
+        if DRILL_STATE["db_stop_time"] is None:
+            DRILL_STATE["db_stop_time"] = max(elapsed_seconds(), 0)
+        add_timeline_event(
+            f"00:{str(DRILL_STATE['db_stop_time']).zfill(2)} - warroom-db stopped"
+        )
         append_log("[db] container stopped")
 
     if not checkout_result["ok"]:
-        add_timeline_event("00:03 - First 5xx response")
+        if DRILL_STATE["first_failure_time"] is None:
+            failure_second = max(elapsed_seconds(), 1)
+            if DRILL_STATE["db_stop_time"] is not None:
+                failure_second = max(failure_second, DRILL_STATE["db_stop_time"])
+            DRILL_STATE["first_failure_time"] = failure_second
+        add_timeline_event(
+            f"00:{str(DRILL_STATE['first_failure_time']).zfill(2)} - First 5xx response"
+        )
         append_log("[app] POST /checkout -> 500 database unavailable")
 
     if DRILL_STATE["error_count"] >= 2:
@@ -265,6 +280,108 @@ def probe_db_down_status() -> dict:
     }
 
 
+def classify_fear_with_ollama(fear: str) -> str:
+    print("[WARROOM backend] starting Ollama classification")
+
+    prompt = (
+        "Classify the following fear into exactly one supported drill type.\n"
+        "Supported drill types:\n"
+        "- db_down\n"
+        "- latency_spike\n"
+        "- request_flood\n"
+        "Return valid JSON only with this shape: {\"drill_type\": \"...\"}\n"
+        "Do not explain reasoning.\n"
+        "If uncertain, choose the closest supported category.\n"
+        "Mapping guidance:\n"
+        "- \"database goes down\" -> db_down\n"
+        "- \"database gets slow\" -> latency_spike\n"
+        "- \"traffic spike\" -> request_flood\n"
+        "- \"requests flood checkout\" -> request_flood\n\n"
+        f"Fear: {fear}"
+    )
+
+    response = requests.post(
+        "http://127.0.0.1:11434/api/generate",
+        json={
+            "model": "llama3",
+            "stream": False,
+            "prompt": prompt,
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    response_data = response.json()
+    raw_text = response_data.get("response", "").strip()
+
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    classification = json.loads(raw_text)
+    drill_type = classification["drill_type"]
+
+    if drill_type not in DRILL_CONFIG:
+        raise ValueError(f"Unsupported drill type from Ollama: {drill_type}")
+
+    print(f"[WARROOM backend] Ollama classification success drill_type={drill_type}")
+    return drill_type
+
+
+def generate_expected_impact_with_ollama(
+    fear: str,
+    drill_type: str,
+    label: str,
+    target_service: str,
+    duration: str,
+) -> str:
+    print("[WARROOM backend] starting Ollama expected_impact generation")
+
+    prompt = (
+        "You are generating expected impact text for a controlled resilience drill.\n"
+        "Supported drill types are fixed and already chosen.\n"
+        "Do not invent new drill types.\n"
+        "Do not invent new target services.\n"
+        "Describe the likely user-visible impact for this drill type in one concise sentence.\n"
+        "Keep it grounded and practical.\n"
+        "Do not output commands.\n"
+        "Return valid JSON only with this shape: {\"expected_impact\": \"...\"}\n"
+        "Example styles:\n"
+        "- db_down: \"Checkout requests will likely fail during the outage window because the application depends directly on the database.\"\n"
+        "- latency_spike: \"Checkout responses may slow down or time out as database latency increases.\"\n"
+        "- request_flood: \"Checkout success rate may drop and response times may rise under sustained concurrent traffic.\"\n\n"
+        f"Fear: {fear}\n"
+        f"Drill type: {drill_type}\n"
+        f"Label: {label}\n"
+        f"Target service: {target_service}\n"
+        f"Default duration: {duration}\n"
+    )
+
+    response = requests.post(
+        "http://127.0.0.1:11434/api/generate",
+        json={
+            "model": "llama3",
+            "stream": False,
+            "prompt": prompt,
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    response_data = response.json()
+    raw_text = response_data.get("response", "").strip()
+
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    impact = json.loads(raw_text)["expected_impact"]
+    print("[WARROOM backend] Ollama expected_impact success")
+    return impact
+
+
 def build_real_db_down_evidence() -> dict:
     success_rate = max(0, min(100, int(round(
         (DRILL_STATE["success_count"] / max(DRILL_STATE["probe_count"], 1)) * 100
@@ -284,14 +401,76 @@ def build_real_db_down_evidence() -> dict:
             "Add retry handling, circuit breaker logic, and graceful fallback "
             "when the database is unreachable."
         ),
+        "summary": (
+            "The drill indicates checkout failures after the database became "
+            "unavailable."
+        ),
         "logs": list(DRILL_STATE["logs"]),
+    }
+
+
+def generate_ollama_verdict(evidence_input: dict) -> dict:
+    print("[WARROOM backend] starting Ollama verdict generation")
+
+    prompt = (
+        "You are writing a resilience verdict for an engineering drill.\n"
+        "Use only the provided evidence: metrics, logs, and timeline.\n"
+        "Do not invent facts or systems that are not in the evidence.\n"
+        "Focus on application and system failure reasoning, not just the raw infrastructure event.\n"
+        "Explain what dependency or resilience weakness caused user-facing failure.\n"
+        "Avoid shallow advice.\n"
+        "Bad likely_cause example: \"warroom-db stopped\"\n"
+        "Better likely_cause example: "
+        "\"The checkout path had a hard dependency on the database and no graceful "
+        "fallback, so requests failed immediately after the database became unavailable.\"\n"
+        "Bad suggested_fix example: \"Ensure warroom-db is running\"\n"
+        "Better suggested_fix example: "
+        "\"Add retry logic, circuit breaker behavior, and a fallback response when "
+        "the database is unavailable.\"\n"
+        "Suggested fixes should emphasize resilience patterns such as retry handling, "
+        "circuit breaker behavior, graceful degradation, fallback responses, and "
+        "dependency protection where supported by the evidence.\n"
+        "If the evidence is weak, say uncertainty clearly.\n"
+        "Keep the response concise:\n"
+        "- likely_cause: 1-2 sentences\n"
+        "- suggested_fix: 1-2 sentences\n"
+        "- summary: 1 sentence\n"
+        "Return valid JSON only with keys: likely_cause, suggested_fix, summary.\n\n"
+        f"Evidence:\n{json.dumps(evidence_input, indent=2)}"
+    )
+
+    response = requests.post(
+        "http://127.0.0.1:11434/api/generate",
+        json={
+            "model": "llama3",
+            "stream": False,
+            "prompt": prompt,
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    response_data = response.json()
+    raw_text = response_data.get("response", "").strip()
+
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    verdict = json.loads(raw_text)
+    print("[WARROOM backend] Ollama success")
+    return {
+        "likely_cause": verdict["likely_cause"],
+        "suggested_fix": verdict["suggested_fix"],
+        "summary": verdict["summary"],
     }
 
 
 def wait_for_demo_health(timeout_seconds: int = 15) -> None:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
-        result = probe_endpoint("GET", "http://127.0.0.1:5000/health")
+        result = probe_endpoint("GET", f"{APP_BASE_URL}/health")
         print(f"[WARROOM backend] health check result={result}")
         if result["ok"]:
             return
@@ -462,6 +641,10 @@ def build_evidence(drill_type: str) -> dict:
                 "Add retry handling, circuit breaker logic, and graceful fallback "
                 "when the database is unreachable."
             ),
+            "summary": (
+                "The drill indicates checkout failures after the database became "
+                "unavailable."
+            ),
             "logs": [
                 "[app] POST /checkout -> 500 database unavailable",
                 "[db] container stopped",
@@ -477,6 +660,7 @@ def build_evidence(drill_type: str) -> dict:
             "first_failure_time": 4,
             "likely_cause": "Database latency increased sharply and requests timed out.",
             "suggested_fix": "Add timeouts, retries with limits, and isolate slow dependencies.",
+            "summary": "The drill indicates dependency latency caused timeouts and failures.",
             "logs": [
                 "[proxy] injected downstream latency",
                 "[app] GET /checkout -> 504 upstream timeout",
@@ -491,6 +675,7 @@ def build_evidence(drill_type: str) -> dict:
         "first_failure_time": 3,
         "likely_cause": "Request volume exceeded app capacity and error rates climbed.",
         "suggested_fix": "Add rate limiting, autoscaling, and queue protection under load.",
+        "summary": "The drill indicates the app degraded under sustained request load.",
         "logs": [
             "[load] request flood started",
             "[app] POST /checkout -> 503 overloaded",
@@ -528,8 +713,26 @@ def root():
 @app.post("/classify")
 def classify(request: ClassifyRequest):
     print(f"[WARROOM backend] POST /classify fear={request.fear!r}")
-    drill_type = classify_fear_text(request.fear)
-    return DRILL_CONFIG[drill_type]
+    try:
+        drill_type = classify_fear_with_ollama(request.fear)
+    except Exception as exc:
+        print(f"[WARROOM backend] Ollama classification fallback: {exc}")
+        drill_type = classify_fear_text(request.fear)
+
+    response = dict(DRILL_CONFIG[drill_type])
+
+    try:
+        response["expected_impact"] = generate_expected_impact_with_ollama(
+            fear=request.fear,
+            drill_type=response["drill_type"],
+            label=response["label"],
+            target_service=response["target_service"],
+            duration=response["duration"],
+        )
+    except Exception as exc:
+        print(f"[WARROOM backend] Ollama expected_impact fallback: {exc}")
+
+    return response
 
 
 @app.post("/drill/start")
@@ -626,7 +829,21 @@ def drill_evidence():
 
     if DRILL_STATE["drill_type"] == "db_down" and DRILL_STATE["status"] != "idle":
         print("[WARROOM backend] evidence fetch for real db_down drill")
-        return DRILL_STATE["evidence"] or build_real_db_down_evidence()
+        evidence = DRILL_STATE["evidence"] or build_real_db_down_evidence()
+        ollama_input = {
+            "drill_type": DRILL_STATE["drill_type"],
+            "success_rate": evidence["success_rate"],
+            "p95_latency": evidence["p95_latency"],
+            "error_count": evidence["error_count"],
+            "first_failure_time": evidence["first_failure_time"],
+            "timeline": list(DRILL_STATE["timeline"]),
+            "logs": evidence["logs"],
+        }
+        try:
+            evidence.update(generate_ollama_verdict(ollama_input))
+        except Exception as exc:
+            print(f"[WARROOM backend] Ollama fallback: {exc}")
+        return evidence
 
     if not DRILL_STATE["evidence"]:
         return {
@@ -636,6 +853,7 @@ def drill_evidence():
             "first_failure_time": None,
             "likely_cause": "No completed drill evidence is available yet.",
             "suggested_fix": "Start a drill and allow it to complete.",
+            "summary": "No completed drill evidence is available yet.",
             "logs": [],
         }
 
