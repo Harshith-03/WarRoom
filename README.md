@@ -1,183 +1,216 @@
-# WARROOM — Rehearse Your Outage in Plain English
+# WARROOM
 
-WARROOM is a local-first AI resilience drill simulator for containerized apps. A user types an outage fear in plain English, approves a blast radius, watches a controlled failure unfold, and receives an evidence-backed verdict using real metrics and logs.
+**Break it before your users do.**
 
-## Current Status
+WARROOM is a chaos engineering and resilience testing tool that allows developers, solo builders, and teams to simulate real system failures, observe their impact in real time, and understand how their application behaves under stress before it reaches production users.
 
-### What's Built (Member B — Demo Environment)
-- Flask checkout demo app with real Postgres database
-- Toxiproxy for latency injection between app and database
-- Full compose setup — single command starts the entire stack
-- Tested and confirmed: DB Down drill works (stopping DB causes app to return 500 errors, restarting recovers)
+## Why WARROOM Exists
 
-### What's Pending (Member A — Core)
-- Frontend (4 screens: Fear Input, Approval, Battle, Verdict)
-- Backend (FastAPI with 5 API routes)
-- MCP Server (FastMCP with 3 tools)
-- LLM Integration (classification + verdict summarization)
+Modern applications are increasingly built:
 
-## Quick Start
+- by solo entrepreneurs shipping fast
+- using AI-generated code
+- with multiple external dependencies
 
-### Prerequisites
-- Podman Desktop installed with Podman machine running (or Docker)
-- Works on both Windows and macOS
+In this environment, systems often work in ideal conditions but fail unpredictably under stress.
 
-### Start the full stack
-```
+WARROOM is built to answer one critical question:
+
+**What happens when something breaks?**
+
+Instead of guessing, WARROOM lets you:
+
+- simulate failure scenarios
+- observe real impact on your system
+- understand the blast radius instantly
+- take action before users are affected
+
+## Who This Is For
+
+### Solo Builders and Founders
+
+If you are building quickly and deploying frequently, WARROOM helps you validate that your system will not break under real-world conditions.
+
+### Developers Using AI-Generated Code
+
+AI tools can generate working code, but not always resilient systems. WARROOM helps ensure that your application behaves correctly when dependencies fail or degrade.
+
+### Teams Preparing for Scale
+
+Before increasing traffic or launching features, WARROOM allows you to stress test critical paths and identify weak points early.
+
+## What WARROOM Does
+
+WARROOM provides a full loop from failure simulation to action:
+
+1. Simulate failures
+2. Observe system behavior
+3. Understand impact in plain English
+4. Get actionable next steps
+
+## Core Features
+
+### Failure Simulation
+
+Trigger real system-level failures in a controlled environment:
+
+- Database outage (`DB Down`)
+- Latency injection (`Latency Spike`)
+- Traffic surge (`Request Flood`)
+
+These are executed using container-level controls and network manipulation.
+
+### Real-Time System Visibility
+
+WARROOM continuously monitors the system during a drill and shows:
+
+- service status (application and database)
+- success rate and error count
+- response latency (`p95`)
+- time of first failure
+- event timeline
+
+All metrics are derived from real responses, not simulated values.
+
+### MCP-Based Control Plane
+
+WARROOM uses a control layer to execute and track system changes:
+
+- container stop and restart
+- latency injection via proxy
+- load generation
+
+This makes the system transparent and reproducible.
+
+### Live Interpretation Layer
+
+WARROOM translates system signals into human-readable insights.
+
+Instead of raw logs or dashboards, it explains:
+
+- what is happening
+- why it is happening
+- how it affects users
+
+This makes it accessible even to non-expert users.
+
+### Technical Verdict
+
+After each drill, WARROOM provides a clear diagnostic view:
+
+- what failed
+- how severe the failure was
+- supporting evidence (metrics and timeline)
+- likely cause
+
+### Action Plan for Recovery and Improvement
+
+WARROOM generates a structured next-step plan:
+
+- what to fix immediately
+- what to improve next
+- how to make the system more resilient
+
+These steps are written in a way that can be directly used with AI tools or engineering workflows.
+
+## Example Scenarios
+
+### Database Outage
+
+Simulate the database going offline and observe:
+
+- checkout failures
+- application degradation
+- full loss of functionality in critical flows
+
+### Latency Injection
+
+Introduce delay in database communication and observe:
+
+- increased response time
+- degraded user experience
+- potential cascading failures
+
+### Traffic Surge
+
+Apply load to the system and observe:
+
+- system saturation
+- latency spikes
+- failure thresholds
+
+## How to Run
+
+### Start the System
+
+```bash
 podman compose up
 ```
-Or with Docker:
-```
-docker compose up
-```
 
-First run will build the demo app image and pull Postgres, Toxiproxy, and curl images. Subsequent runs use cached images.
+### Verify Services
 
-### Verify it's working
-
-Health check:
-```
-curl http://localhost:5000/health
-```
-Expected: `{"status": "healthy", "db": "connected"}`
-
-Checkout:
-```
-curl -X POST http://localhost:5000/checkout -H "Content-Type: application/json" -d '{}'
-```
-Expected: `{"status": "success", "response_time": <ms>}`
-
-### Stop everything
-```
-podman compose down
+```bash
+curl http://localhost:5001/health
+curl -X POST http://localhost:5001/checkout -H "Content-Type: application/json" -d '{}'
 ```
 
-## Architecture
+### Run Backend
 
-```
-Web UI (Member A)
-  ↓
-FastAPI Backend (Member A)
-  ├── calls Local LLM
-  └── calls FastMCP
-         ├── Podman CLI control
-         ├── Toxiproxy commands
-         └── hey load test
-                 ↓
-         Demo Environment (Member B) ← THIS IS WHAT'S BUILT
-         ├── warroom-app (Flask on port 5000)
-         ├── warroom-db (Postgres on port 5432)
-         └── warroom-toxiproxy (proxy on port 5433, API on port 8474)
+```bash
+cd backend
+uvicorn main:app --reload
 ```
 
-## Services (Locked Names — Do Not Change)
+### Run MCP Server
 
-| Service | Image | Port | Purpose |
-|---|---|---|---|
-| warroom-app | Built from ./demo-app | 5000 | Flask checkout demo app |
-| warroom-db | postgres:16 | 5432 (internal) | Postgres database |
-| warroom-toxiproxy | shopify/toxiproxy:2.12.0 | 8474 (API), 5433 (proxy) | Latency injection proxy |
-| warroom-toxiproxy-setup | curlimages/curl | — | One-shot proxy creation |
-| warroom-backend | placeholder | 8000 | Member A replaces this |
-| warroom-mcp | placeholder | — | Member A replaces this |
-
-## API Contracts (Locked — Do Not Change)
-
-### POST /checkout
-Request: `{}` (or with optional fields: item, quantity, total)
-
-Success (200):
-```json
-{"status": "success", "response_time": 5}
+```bash
+cd mcp-server
+source .venv/bin/activate
+uvicorn server:app --port 9100
 ```
 
-Failure (500):
-```json
-{"status": "error", "response_time": 0, "error": "connection to server failed..."}
+### Open Frontend
+
+```bash
+open frontend/index.html
 ```
 
-### GET /health
-Healthy (200):
-```json
-{"status": "healthy", "db": "connected"}
-```
+## Architecture Overview
 
-Unhealthy (503):
-```json
-{"status": "unhealthy", "db": "disconnected"}
-```
+- Frontend: HTML, JavaScript, CSS
+- Backend: FastAPI
+- Control Plane: MCP server (Podman + Toxiproxy)
+- Demo Application: Flask + Postgres
+- Infrastructure: container-based environment
 
-## How Drills Work Against This Environment
+## What Makes WARROOM Different
 
-### Drill 1: DB Down
-```
-podman stop warroom_warroom-db_1
-```
-Effect: /checkout returns 500, /health returns 503
+WARROOM is not just a monitoring tool.
 
-Recovery:
-```
-podman start warroom_warroom-db_1
-```
+It combines:
 
-### Drill 2: Latency Spike
-```
-curl -X POST http://localhost:8474/proxies/warroom-db-proxy/toxics -H "Content-Type: application/json" -d '{"name":"latency","type":"latency","attributes":{"latency":800}}'
-```
-Effect: /checkout response_time increases significantly
+- failure simulation
+- real-time observability
+- interpretation
+- action planning
 
-Remove latency:
-```
-curl -X DELETE http://localhost:8474/proxies/warroom-db-proxy/toxics/latency
-```
+This creates a complete workflow from:
 
-### Drill 3: Request Flood
-```
-hey -c 30 -z 20s -m POST -H "Content-Type: application/json" -d '{}' http://localhost:5000/checkout
-```
-Effect: High concurrent load, potential latency increase and errors
+**failure -> understanding -> resolution**
 
-## Database Schema
+## Future Direction
 
-Table: `checkouts`
-| Column | Type | Notes |
-|---|---|---|
-| id | SERIAL | Primary key, auto-increment |
-| item | TEXT | Default: "demo-item" |
-| quantity | INTEGER | Default: 1 |
-| total | DOUBLE PRECISION | Default: 9.99 |
-| created_at | TIMESTAMP | Auto-set to NOW() |
+- deeper AI-assisted failure analysis
+- automated resilience scoring
+- integration with CI/CD pipelines
+- support for additional failure types and environments
 
-Seeded with 5 demo rows on first startup.
+## Summary
 
-## App Behavior Notes
-- The Flask app connects to Postgres through Toxiproxy (warroom-toxiproxy:5433), NOT directly to warroom-db:5432. This is required for the latency drill to work.
-- On startup, the app retries the database connection up to 10 times with 2-second intervals. This handles compose startup ordering.
-- Every checkout request is logged to stdout: `[TIMESTAMP] STATUS_CODE /checkout RESPONSE_TIME_MS`
+WARROOM helps you answer:
 
-## File Structure
-```
-warroom/
-├── README.md
-├── compose.yaml
-├── demo-app/
-│   ├── Containerfile
-│   ├── app.py
-│   └── requirements.txt
-```
+- What breaks when my system is under stress?
+- How quickly does it fail?
+- What do I need to fix before users are impacted?
 
-## For Member A: Integration Guide
-
-When building the MCP server tools:
-
-1. **run_drill("db_down")** → run `podman stop warroom_warroom-db_1`
-2. **run_drill("latency_spike")** → POST toxic to `http://localhost:8474/proxies/warroom-db-proxy/toxics`
-3. **run_drill("request_flood")** → run `hey` against `http://warroom-app:5000/checkout` (use internal network name, or localhost:5000 from host)
-4. **reset()** → restart DB, remove toxics, verify /health returns healthy
-5. **get_evidence(drill_id)** → poll /checkout during drill, collect response codes and times
-
-Container names follow the pattern: `warroom_<service-name>_1`. Run `podman ps` to confirm exact names on your machine.
-
-Replace the placeholder services in compose.yaml:
-- `warroom-backend`: your FastAPI server (port 8000)
-- `warroom-mcp`: your FastMCP server
+Instead of discovering failures in production, WARROOM lets you discover them safely and early.
