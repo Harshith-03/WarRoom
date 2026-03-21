@@ -779,6 +779,59 @@ button:active {
   background: rgba(15, 18, 30, 0.52);
 }
 
+.battle-interpretation-card {
+  margin-top: 18px;
+  padding: 20px;
+  background:
+    linear-gradient(135deg, rgba(100, 181, 246, 0.08), transparent 45%),
+    rgba(15, 18, 30, 0.68);
+  border: 1px solid rgba(100, 181, 246, 0.18);
+  border-radius: 18px;
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.34),
+    0 0 18px rgba(100, 181, 246, 0.06);
+  animation: panel-enter 360ms ease 80ms backwards;
+}
+
+.interpretation-heading {
+  color: var(--info);
+  margin-bottom: 8px;
+}
+
+.interpretation-helper {
+  margin-bottom: 14px;
+}
+
+.interpretation-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.interpretation-item {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(13, 16, 27, 0.74);
+  border: 1px solid rgba(100, 181, 246, 0.12);
+  color: #e2e8f0;
+  line-height: 1.55;
+  font-size: 14px;
+}
+
+.interpretation-item::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 10px;
+  border-radius: 999px;
+  background: var(--info);
+  box-shadow: 0 0 12px rgba(100, 181, 246, 0.32);
+  vertical-align: middle;
+}
+
 .summary-title {
   margin-bottom: 12px;
   color: var(--text);

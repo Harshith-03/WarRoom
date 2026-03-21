@@ -114,6 +114,9 @@ let resetInProgress = false;
 let battleStartedAt = null;
 let verdictTransitionInFlight = false;
 let battleCompleted = false;
+let aiInterpretationLines = [];
+let aiInterpretationRequestInFlight = false;
+let interpretationRefreshCounter = 0;
 
 function cloneBattleState(state) {
   return {
@@ -353,6 +356,9 @@ function resetBattleState() {
   battleStartedAt = null;
   verdictTransitionInFlight = false;
   battleCompleted = false;
+  aiInterpretationLines = [];
+  aiInterpretationRequestInFlight = false;
+  interpretationRefreshCounter = 0;
   battleState = cloneBattleState(DEFAULT_BATTLE_STATE);
   verdictState = null;
   actionPlanState = null;
@@ -448,12 +454,154 @@ function buildBattleSummaryLines() {
   return lines;
 }
 
+function generateLiveNarration() {
+  const drillType = currentPlan?.drillType || "db_down";
+  const successRateValue = Number.parseInt(battleState.successRate, 10);
+  const errorCountValue = Number.parseInt(battleState.errorCount, 10);
+  const latencyValue = Number.parseInt(battleState.p95Latency, 10);
+  const hasMcpActivity = battleState.mcpActivity.length > 0;
+  const hasFirstFailure = battleState.firstFailure !== "--";
+  const lines = [];
+
+  if (drillType === "db_down") {
+    if (battleState.dbStatus === "stopped") {
+      lines.push("WARROOM intentionally took the database offline through MCP.");
+    } else if (hasMcpActivity) {
+      lines.push("WARROOM is using MCP to control the database failure simulation and watch the blast radius.");
+    } else {
+      lines.push("WARROOM is preparing a database failure simulation and watching the checkout path closely.");
+    }
+
+    if (errorCountValue > 0 || hasFirstFailure) {
+      lines.push("Checkout is now failing because the app cannot reach its database dependency.");
+    } else if (battleState.appStatus === "degraded") {
+      lines.push("The app is still running, but the checkout path is weakening as database access becomes unstable.");
+    } else {
+      lines.push("The app is still up, but WARROOM is watching for user-facing impact on checkout.");
+    }
+
+    if (!Number.isNaN(successRateValue) && successRateValue === 0) {
+      lines.push("Users would currently be unable to complete purchases.");
+    } else if (!Number.isNaN(successRateValue) && successRateValue < 100) {
+      lines.push("The blast radius has reached the purchase flow and some users would now see failed checkout attempts.");
+    } else {
+      lines.push("No checkout failures are visible yet, but WARROOM is still collecting live evidence.");
+    }
+
+    if (battleCompleted) {
+      lines.push("WARROOM has collected enough evidence to show that this database outage directly undermines checkout reliability.");
+    } else if (battleState.dbStatus === "stopped") {
+      lines.push("Failure impact is spreading from infrastructure to the user-facing checkout flow.");
+    } else {
+      lines.push("This drill is testing how quickly a database dependency failure becomes visible to users.");
+    }
+  } else if (drillType === "latency_spike") {
+    if (hasMcpActivity) {
+      lines.push("WARROOM injected latency into the database path through MCP.");
+    } else {
+      lines.push("WARROOM is simulating a slower database path and observing the impact on checkout.");
+    }
+
+    if (!Number.isNaN(latencyValue) && latencyValue >= 800) {
+      lines.push("The database is still online, but checkout is responding much more slowly.");
+    } else {
+      lines.push("The system is still serving traffic, but response pressure is building along the checkout path.");
+    }
+
+    if (errorCountValue > 0 || hasFirstFailure) {
+      lines.push("Users may still complete checkout, but the degraded dependency is now creating visible errors.");
+    } else {
+      lines.push("Users may still complete checkout, but the experience is degraded and failures could follow.");
+    }
+
+    if (battleCompleted) {
+      lines.push("WARROOM has confirmed that dependency slowdown can erode checkout reliability before a full outage occurs.");
+    } else {
+      lines.push("If latency continues rising, slow responses may turn into timeouts or failed purchases.");
+    }
+  } else {
+    lines.push("WARROOM is pushing sustained traffic into the checkout path and watching how the system absorbs load.");
+
+    if (errorCountValue > 0 || hasFirstFailure) {
+      lines.push("The app is still responding, but pressure is turning into visible checkout failures.");
+    } else if (!Number.isNaN(latencyValue) && latencyValue > 300) {
+      lines.push("The app is still responding, but request pressure is pushing response delay upward.");
+    } else {
+      lines.push("The system is still serving requests, but WARROOM is monitoring for rising latency and saturation.");
+    }
+
+    if (!Number.isNaN(successRateValue) && successRateValue < 100) {
+      lines.push("Reliability is starting to fall as sustained traffic keeps stressing the checkout flow.");
+    } else {
+      lines.push("Users may still succeed for now, but the safety margin is shrinking under load.");
+    }
+
+    if (battleCompleted) {
+      lines.push("WARROOM has gathered enough evidence to show how traffic pressure changes the risk profile of checkout.");
+    } else {
+      lines.push("If traffic continues rising, latency and failure risk will keep increasing.");
+    }
+  }
+
+  return lines.slice(0, 4);
+}
+
+async function fetchLiveInterpretation() {
+  const response = await fetch("http://127.0.0.1:8000/drill/live-interpretation");
+
+  if (!response.ok) {
+    throw new Error(`Live interpretation request failed with status ${response.status}`);
+  }
+
+  const data = await response.json();
+  return Array.isArray(data.lines) ? data.lines.filter((line) => typeof line === "string" && line.trim()).slice(0, 4) : [];
+}
+
+function maybeRefreshAiInterpretation(force = false) {
+  if (aiInterpretationRequestInFlight) {
+    return;
+  }
+
+  if (!currentDrillId) {
+    return;
+  }
+
+  if (!force && interpretationRefreshCounter % 2 !== 0) {
+    return;
+  }
+
+  aiInterpretationRequestInFlight = true;
+
+  void fetchLiveInterpretation()
+    .then((lines) => {
+      if (lines.length > 0) {
+        aiInterpretationLines = lines;
+        renderLiveInterpretation();
+      }
+    })
+    .catch(() => {
+      // Deterministic narration remains the primary safe path.
+    })
+    .finally(() => {
+      aiInterpretationRequestInFlight = false;
+    });
+}
+
 function renderBattleSummary() {
   const battleSummaryList = document.getElementById("battleSummaryList");
   const lines = buildBattleSummaryLines();
 
   battleSummaryList.innerHTML = lines
     .map((line) => `<li>${line}</li>`)
+    .join("");
+}
+
+function renderLiveInterpretation() {
+  const interpretationList = document.getElementById("liveInterpretationList");
+  const lines = aiInterpretationLines.length > 0 ? aiInterpretationLines : generateLiveNarration();
+
+  interpretationList.innerHTML = lines
+    .map((line) => `<li class="interpretation-item">${line}</li>`)
     .join("");
 }
 
@@ -572,6 +720,7 @@ function renderBattleState() {
   renderTimeline(battleState.timeline);
   renderMcpActivity(battleState.mcpActivity);
   renderBattleSummary();
+  renderLiveInterpretation();
   renderEnvironmentInfo();
 }
 
@@ -600,8 +749,10 @@ function applyDrillStatus(statusData) {
   battleState.statusText = statusData.status === "complete"
     ? "Simulation complete. Review what changed, then view the verdict."
     : "Simulation in progress...";
+  interpretationRefreshCounter += 1;
 
   renderBattleState();
+  maybeRefreshAiInterpretation(statusData.status === "complete");
 }
 
 async function fetchDrillEvidence() {
@@ -855,6 +1006,7 @@ function startDrillStatusPolling() {
 
   startProgressAnimation();
   pollDrillStatus();
+  maybeRefreshAiInterpretation(true);
   drillStatusPollingId = window.setInterval(pollDrillStatus, 1000);
 }
 

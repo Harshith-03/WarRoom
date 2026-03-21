@@ -80,6 +80,29 @@ DRILL_STATE = {
 }
 
 
+def ollama_json_request(prompt: str, timeout: int = 20) -> dict:
+    response = requests.post(
+        "http://127.0.0.1:11434/api/generate",
+        json={
+            "model": "llama3",
+            "stream": False,
+            "prompt": prompt,
+        },
+        timeout=timeout,
+    )
+    response.raise_for_status()
+
+    response_data = response.json()
+    raw_text = response_data.get("response", "").strip()
+
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+    return json.loads(raw_text)
+
+
 def reset_drill_state() -> None:
     DRILL_STATE["drill_id"] = None
     DRILL_STATE["drill_type"] = None
@@ -409,26 +432,7 @@ def classify_fear_with_ollama(fear: str) -> str:
         f"Fear: {fear}"
     )
 
-    response = requests.post(
-        "http://127.0.0.1:11434/api/generate",
-        json={
-            "model": "llama3",
-            "stream": False,
-            "prompt": prompt,
-        },
-        timeout=20,
-    )
-    response.raise_for_status()
-
-    response_data = response.json()
-    raw_text = response_data.get("response", "").strip()
-
-    if raw_text.startswith("```"):
-        raw_text = raw_text.strip("`")
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:].strip()
-
-    classification = json.loads(raw_text)
+    classification = ollama_json_request(prompt)
     drill_type = classification["drill_type"]
 
     if drill_type not in DRILL_CONFIG:
@@ -467,26 +471,7 @@ def generate_expected_impact_with_ollama(
         f"Default duration: {duration}\n"
     )
 
-    response = requests.post(
-        "http://127.0.0.1:11434/api/generate",
-        json={
-            "model": "llama3",
-            "stream": False,
-            "prompt": prompt,
-        },
-        timeout=20,
-    )
-    response.raise_for_status()
-
-    response_data = response.json()
-    raw_text = response_data.get("response", "").strip()
-
-    if raw_text.startswith("```"):
-        raw_text = raw_text.strip("`")
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:].strip()
-
-    impact = json.loads(raw_text)["expected_impact"]
+    impact = ollama_json_request(prompt)["expected_impact"]
     print("[WARROOM backend] Ollama expected_impact success")
     return impact
 
@@ -578,26 +563,7 @@ def generate_ollama_verdict(evidence_input: dict) -> dict:
         f"Evidence:\n{json.dumps(evidence_input, indent=2)}"
     )
 
-    response = requests.post(
-        "http://127.0.0.1:11434/api/generate",
-        json={
-            "model": "llama3",
-            "stream": False,
-            "prompt": prompt,
-        },
-        timeout=20,
-    )
-    response.raise_for_status()
-
-    response_data = response.json()
-    raw_text = response_data.get("response", "").strip()
-
-    if raw_text.startswith("```"):
-        raw_text = raw_text.strip("`")
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:].strip()
-
-    verdict = json.loads(raw_text)
+    verdict = ollama_json_request(prompt)
     print("[WARROOM backend] Ollama success")
     return {
         "likely_cause": verdict["likely_cause"],
@@ -671,32 +637,69 @@ def generate_ollama_action_plan(action_plan_input: dict) -> dict:
         f"Evidence:\n{json.dumps(action_plan_input, indent=2)}"
     )
 
-    response = requests.post(
-        "http://127.0.0.1:11434/api/generate",
-        json={
-            "model": "llama3",
-            "stream": False,
-            "prompt": prompt,
-        },
-        timeout=20,
-    )
-    response.raise_for_status()
-
-    response_data = response.json()
-    raw_text = response_data.get("response", "").strip()
-
-    if raw_text.startswith("```"):
-        raw_text = raw_text.strip("`")
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:].strip()
-
-    action_plan = json.loads(raw_text)
+    action_plan = ollama_json_request(prompt)
     print("[WARROOM backend] Ollama action plan success")
     return {
         "do_now": action_plan["do_now"][:3],
         "fix_in_code": action_plan["fix_in_code"][:3],
         "improve_later": action_plan["improve_later"][:3],
     }
+
+
+def build_live_interpretation_input() -> dict:
+    if DRILL_STATE["drill_type"] == "db_down":
+        evidence = DRILL_STATE["evidence"] or build_real_db_down_evidence()
+        app_status = "degraded" if evidence.get("error_count", 0) > 0 else "running"
+        db_status = "stopped" if DRILL_STATE["db_stop_time"] is not None else "running"
+    elif DRILL_STATE["drill_type"] == "latency_spike":
+        evidence = DRILL_STATE["evidence"] or build_real_latency_evidence()
+        app_status = "degraded" if (
+            (evidence.get("p95_latency") or 0) >= 800 or (evidence.get("error_count") or 0) > 0
+        ) else "running"
+        db_status = "running"
+    else:
+        evidence = DRILL_STATE["evidence"] or build_evidence(DRILL_STATE["drill_type"] or "db_down")
+        app_status = "degraded" if (evidence.get("error_count") or 0) > 0 else "running"
+        db_status = "running"
+
+    status_snapshot = {
+        "drill_type": DRILL_STATE["drill_type"] or "db_down",
+        "status": DRILL_STATE["status"],
+        "app_status": app_status,
+        "db_status": db_status,
+        "success_rate": evidence.get("success_rate"),
+        "error_count": evidence.get("error_count"),
+        "p95_latency": evidence.get("p95_latency"),
+        "first_failure_time": evidence.get("first_failure_time"),
+        "mcp_activity": list(DRILL_STATE["mcp_activity"]),
+        "timeline": list(DRILL_STATE["timeline"]),
+    }
+    return status_snapshot
+
+
+def generate_ollama_live_interpretation(interpretation_input: dict) -> dict:
+    print("[WARROOM backend] starting Ollama live interpretation")
+    prompt = (
+        "You are generating live failure narration for a resilience drill dashboard.\n"
+        "Return valid JSON only in this shape: {\"lines\": [\"...\", \"...\", \"...\", \"...\"]}\n"
+        "Rules:\n"
+        "- maximum 4 lines\n"
+        "- plain English\n"
+        "- short and crisp\n"
+        "- grounded only in the provided signals\n"
+        "- do not invent facts, metrics, actions, or systems\n"
+        "- connect system behavior to user impact\n"
+        "- explain MCP actions in human language\n"
+        "- if evidence is weak, keep the lines cautious\n\n"
+        f"Signals:\n{json.dumps(interpretation_input, indent=2)}"
+    )
+    result = ollama_json_request(prompt, timeout=12)
+    lines = result.get("lines", [])
+    if not isinstance(lines, list):
+        raise ValueError("Ollama live interpretation did not return a lines list")
+    cleaned_lines = [str(line).strip() for line in lines if str(line).strip()][:4]
+    print("[WARROOM backend] Ollama live interpretation success")
+    return {"lines": cleaned_lines}
 
 
 def wait_for_demo_health(timeout_seconds: int = 15) -> None:
@@ -1126,6 +1129,24 @@ def drill_evidence():
         }
 
     return DRILL_STATE["evidence"]
+
+
+@app.get("/drill/live-interpretation")
+def drill_live_interpretation():
+    print(
+        f"[WARROOM backend] GET /drill/live-interpretation "
+        f"drill_id={DRILL_STATE['drill_id']} status={DRILL_STATE['status']}"
+    )
+
+    if not DRILL_STATE["drill_id"] or DRILL_STATE["status"] == "idle":
+        return {"lines": []}
+
+    interpretation_input = build_live_interpretation_input()
+    try:
+        return generate_ollama_live_interpretation(interpretation_input)
+    except Exception as exc:
+        print(f"[WARROOM backend] live interpretation fallback: {exc}")
+        return {"lines": []}
 
 
 @app.get("/drill/action-plan")
