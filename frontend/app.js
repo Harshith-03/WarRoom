@@ -197,6 +197,78 @@ function updateApprovalHelper() {
   const intensity = document.getElementById("intensitySelect").value;
   document.getElementById("approvalHelper").textContent =
     `This drill will run for ${duration} at ${intensity} intensity.`;
+  updateThreatLevelIndicator(intensity);
+  syncApprovalToggles();
+  pulseImpactPanel();
+}
+
+function getDrillAccentClass(drillType) {
+  if (drillType === "db_down") {
+    return "mission-header-danger";
+  }
+
+  return "mission-header-warning";
+}
+
+function updateMissionHeader(plan) {
+  const missionHeader = document.getElementById("missionHeader");
+  const missionIcon = document.getElementById("missionIcon");
+
+  missionHeader.classList.remove("mission-header-danger", "mission-header-warning");
+  missionIcon.classList.remove("mission-icon-danger", "mission-icon-warning");
+
+  const accentClass = getDrillAccentClass(plan.drillType);
+  missionHeader.classList.add(accentClass);
+  missionIcon.classList.add(accentClass.replace("mission-header", "mission-icon"));
+}
+
+function updateThreatLevelIndicator(intensity) {
+  const bars = Array.from(document.querySelectorAll("#threatBars .threat-bar"));
+  const threatText = document.getElementById("threatText");
+  const intensityLevel = intensity === "High" ? 3 : intensity === "Medium" ? 2 : 1;
+
+  bars.forEach((bar, index) => {
+    bar.classList.remove("is-active", "is-danger", "is-warning");
+    if (index < intensityLevel) {
+      bar.classList.add("is-active");
+      bar.classList.add(intensity === "High" ? "is-danger" : "is-warning");
+    }
+  });
+
+  threatText.textContent = `${intensity} intensity`;
+}
+
+function syncApprovalToggles() {
+  const duration = document.getElementById("durationSelect").value;
+  const intensity = document.getElementById("intensitySelect").value;
+
+  document.querySelectorAll("[data-duration]").forEach((button) => {
+    button.classList.toggle("selected", button.dataset.duration === duration);
+  });
+
+  document.querySelectorAll("[data-intensity]").forEach((button) => {
+    const isSelected = button.dataset.intensity === intensity;
+    button.classList.remove("selected", "selected-success", "selected-warning", "selected-danger");
+    if (!isSelected) {
+      return;
+    }
+
+    button.classList.add("selected");
+    if (intensity === "Low") {
+      button.classList.add("selected-success");
+    } else if (intensity === "High") {
+      button.classList.add("selected-danger");
+    } else {
+      button.classList.add("selected-warning");
+    }
+  });
+}
+
+function pulseImpactPanel() {
+  const impactPanel = document.getElementById("impactPanel");
+  impactPanel.classList.remove("impact-refresh");
+  void impactPanel.offsetWidth;
+  impactPanel.classList.add("impact-refresh");
 }
 
 function populateApprovalScreen(plan) {
@@ -205,6 +277,17 @@ function populateApprovalScreen(plan) {
   document.getElementById("durationSelect").value = plan.duration;
   document.getElementById("intensitySelect").value = "Medium";
   document.getElementById("impact").textContent = plan.impact;
+  updateMissionHeader(plan);
+  updateApprovalHelper();
+}
+
+function setDurationOption(duration) {
+  document.getElementById("durationSelect").value = duration;
+  updateApprovalHelper();
+}
+
+function setIntensityOption(intensity) {
+  document.getElementById("intensitySelect").value = intensity;
   updateApprovalHelper();
 }
 
@@ -594,7 +677,7 @@ function buildVerdictState(evidenceData) {
     firstFailure,
     likelyCause: evidenceData.likely_cause,
     suggestedFix: evidenceData.suggested_fix,
-    nextActions: buildNextActions(evidenceData),
+    technicalFindings: buildTechnicalFindings(evidenceData, firstFailure),
     evidence: {
       timelineLines,
       logLines: evidenceData.logs,
@@ -608,25 +691,25 @@ function buildVerdictState(evidenceData) {
   };
 }
 
-function buildNextActions(evidenceData) {
+function buildTechnicalFindings(evidenceData, firstFailure) {
   const reasoningText = [
     evidenceData.likely_cause || "",
-    evidenceData.suggested_fix || "",
-    evidenceData.summary || ""
+    evidenceData.summary || "",
+    currentPlan?.drillType || ""
   ].join(" ").toLowerCase();
 
-  if ((currentPlan && currentPlan.drillType === "db_down") || reasoningText.includes("database")) {
+  if (reasoningText.includes("database") || currentPlan?.drillType === "db_down") {
     return [
-      "Restore database availability and confirm checkout can complete again.",
-      "Add fallback behavior so checkout fails gracefully when the database is unreachable.",
-      "Add retry or circuit-breaker protection around database calls in the checkout path."
+      `Checkout impact became visible at ${firstFailure}, confirming a hard dependency on the database path.`,
+      `The system dropped to ${evidenceData.success_rate}% successful requests while p95 latency climbed to ${evidenceData.p95_latency}ms.`,
+      "Observed logs and timeline events show the application did not degrade gracefully after database reachability failed."
     ];
   }
 
   return [
-    "Restore the failing dependency or traffic path and confirm the app recovers.",
-    "Add graceful fallback behavior for the impacted user flow.",
-    "Add protection such as retries, timeouts, or circuit breakers around the weak dependency."
+    `The drill produced ${evidenceData.error_count} failing requests with p95 latency at ${evidenceData.p95_latency}ms.`,
+    `The first user-visible error appeared at ${firstFailure}, showing the impact reached the user flow quickly.`,
+    "Timeline and log evidence indicate the application path weakened under dependency stress before recovery safeguards took effect."
   ];
 }
 
@@ -643,8 +726,8 @@ function populateVerdictScreen() {
   document.getElementById("verdictFirstFailure").textContent = verdictState.firstFailure;
   document.getElementById("likelyCause").textContent = verdictState.likelyCause;
   document.getElementById("suggestedFix").textContent = verdictState.suggestedFix;
-  document.getElementById("nextActionsList").innerHTML = verdictState.nextActions
-    .map((action) => `<li>${action}</li>`)
+  document.getElementById("nextActionsList").innerHTML = verdictState.technicalFindings
+    .map((finding) => `<li>${finding}</li>`)
     .join("");
   document.getElementById("evidenceTimeline").textContent = verdictState.evidence.timelineLines.join("\n");
   document.getElementById("evidenceLogs").textContent = verdictState.evidence.logLines.join("\n");
@@ -819,6 +902,8 @@ async function approveRun() {
   currentPlan.intensity = selectedIntensity;
 
   try {
+    const approveButton = document.getElementById("approveButton");
+    approveButton.classList.add("approval-submit-pulse");
     console.log("[WARROOM] approved drill configuration", {
       drillType: currentPlan.drillType,
       duration: selectedDuration,
@@ -892,6 +977,12 @@ async function resetToStart() {
 document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("durationSelect").addEventListener("change", updateApprovalHelper);
   document.getElementById("intensitySelect").addEventListener("change", updateApprovalHelper);
+  document.querySelectorAll("[data-duration]").forEach((button) => {
+    button.addEventListener("click", () => setDurationOption(button.dataset.duration));
+  });
+  document.querySelectorAll("[data-intensity]").forEach((button) => {
+    button.addEventListener("click", () => setIntensityOption(button.dataset.intensity));
+  });
   setResetButtonState(false);
   resetBattleState();
   showScreen("screen1");

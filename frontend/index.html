@@ -9,69 +9,124 @@
 <body>
   <main class="app-shell">
     <section class="screen-panel" id="screen1">
-      <div class="eyebrow">WARROOM</div>
-      <h1>What breaks your app?</h1>
-      <p class="subtitle">Describe the production fear you want to drill. We will classify it and prepare the blast radius preview.</p>
+      <div class="landing-hero">
+        <div class="landing-copy">
+          <div class="eyebrow">WARROOM</div>
+          <h1>What breaks your app?</h1>
+          <p class="tagline">Break it before your users do</p>
 
-      <input
-        type="text"
-        id="fearInput"
-        placeholder="e.g. What if my database goes down during checkout?"
-        autocomplete="off"
-      >
+          <input
+            type="text"
+            id="fearInput"
+            placeholder="e.g. What if my database goes down during checkout?"
+            autocomplete="off"
+          >
 
-      <div class="chips">
-        <button type="button" class="chip-button" onclick="setFear('Database goes down during checkout')">Database goes down</button>
-        <button type="button" class="chip-button" onclick="setFear('Traffic flood hits checkout requests')">Requests flood checkout</button>
-        <button type="button" class="chip-button" onclick="setFear('Database gets slow and latency spikes')">Database gets slow</button>
+          <div class="chips">
+            <button type="button" class="chip-button" onclick="setFear('Database goes down during checkout')">Database goes down</button>
+            <button type="button" class="chip-button" onclick="setFear('Traffic flood hits checkout requests')">Requests flood checkout</button>
+            <button type="button" class="chip-button" onclick="setFear('Database gets slow and latency spikes')">Database gets slow</button>
+          </div>
+
+          <button type="button" class="primary-button" id="runBtn" onclick="runDrill()">Run Drill</button>
+        </div>
+
+        <aside class="brand-visual-card">
+          <img
+            src="assets/warroom-brand.png"
+            alt="WARROOM brand visual"
+            class="brand-visual-image"
+          >
+        </aside>
       </div>
-
-      <button type="button" class="primary-button" id="runBtn" onclick="runDrill()">Run Drill</button>
     </section>
 
     <section class="screen-panel hidden" id="screen2">
       <div class="eyebrow">Approval</div>
-      <h1>Confirm Blast Radius</h1>
-      <p class="subtitle">Review the detected drill before the exercise begins.</p>
+      <section class="card mission-header" id="missionHeader">
+        <div class="mission-header-copy">
+          <div class="mission-brand-stack">
+            <div class="mission-icon" id="missionIcon" aria-hidden="true"></div>
+            <img
+              src="assets/warroom-brand.png"
+              alt="WARROOM brand mark"
+              class="mission-brand-image"
+            >
+          </div>
+          <div>
+            <div class="mission-label">Mission Confirmation</div>
+            <h1 id="drillType">DB Down</h1>
+            <p class="subtitle">Review the blast radius and launch the drill when the plan looks safe.</p>
+          </div>
+        </div>
+        <div class="threat-level">
+          <div class="mission-label">Threat Level</div>
+          <div class="threat-bars" id="threatBars" aria-hidden="true">
+            <span class="threat-bar"></span>
+            <span class="threat-bar"></span>
+            <span class="threat-bar"></span>
+          </div>
+          <div class="threat-text" id="threatText">Medium intensity</div>
+        </div>
+      </section>
 
-      <div class="card">
-        <div class="detail-row">
-          <span class="detail-label">Detected Drill</span>
-          <span class="detail-value" id="drillType"></span>
-        </div>
-        <div class="detail-row">
-          <span class="detail-label">Target Service</span>
-          <span class="detail-value" id="targetService"></span>
-        </div>
-        <div class="detail-row">
-          <label class="detail-label" for="durationSelect">Duration</label>
-          <select class="approval-select detail-value" id="durationSelect">
+      <div class="approval-grid">
+        <section class="card approval-panel target-panel">
+          <div class="mission-label">Target Service</div>
+          <div class="approval-value approval-value-strong" id="targetService"></div>
+          <p class="approval-panel-copy">This is the service path WARROOM will stress during the drill.</p>
+        </section>
+
+        <section class="card approval-panel">
+          <div class="mission-label">Duration</div>
+          <div class="toggle-group" id="durationToggleGroup">
+            <button type="button" class="toggle-option" data-duration="30 seconds">30s</button>
+            <button type="button" class="toggle-option" data-duration="60 seconds">60s</button>
+            <button type="button" class="toggle-option" data-duration="90 seconds">90s</button>
+          </div>
+          <select class="approval-select approval-select-hidden" id="durationSelect">
             <option value="30 seconds">30 seconds</option>
             <option value="60 seconds">60 seconds</option>
             <option value="90 seconds">90 seconds</option>
           </select>
-        </div>
-        <div class="detail-row">
-          <label class="detail-label" for="intensitySelect">Intensity</label>
-          <select class="approval-select detail-value" id="intensitySelect">
+        </section>
+
+        <section class="card approval-panel">
+          <div class="mission-label">Intensity</div>
+          <div class="toggle-group" id="intensityToggleGroup">
+            <button type="button" class="toggle-option" data-intensity="Low">Low</button>
+            <button type="button" class="toggle-option" data-intensity="Medium">Medium</button>
+            <button type="button" class="toggle-option" data-intensity="High">High</button>
+          </div>
+          <select class="approval-select approval-select-hidden" id="intensitySelect">
             <option value="Low">Low</option>
             <option value="Medium" selected>Medium</option>
             <option value="High">High</option>
           </select>
-        </div>
-        <div class="detail-row">
-          <span class="detail-label">Expected Impact</span>
-          <span class="detail-value" id="impact"></span>
-        </div>
+        </section>
+
+        <section class="card approval-panel impact-panel" id="impactPanel">
+          <div class="mission-label">Expected Impact</div>
+          <div class="approval-value" id="impact"></div>
+          <p class="approval-panel-copy">WARROOM will keep this blast radius contained to the selected drill setup.</p>
+        </section>
       </div>
 
-      <p class="approval-helper" id="approvalHelper">
-        This drill will run for 60 seconds at Medium intensity.
-      </p>
+      <div class="approval-action-bar">
+        <div class="approval-helper-wrap">
+          <span class="ready-dot" aria-hidden="true"></span>
+          <p class="approval-helper" id="approvalHelper">
+            This drill will run for 60 seconds at Medium intensity.
+          </p>
+        </div>
 
-      <div class="actions">
-        <button type="button" class="secondary-button" onclick="goBack()">Cancel</button>
-        <button type="button" class="primary-button" onclick="approveRun()">Approve &amp; Run</button>
+        <div class="approval-actions">
+          <button type="button" class="secondary-button" onclick="goBack()">Cancel</button>
+          <button type="button" class="primary-button approval-submit-button" id="approveButton" onclick="approveRun()">
+            <span class="approval-submit-icon" aria-hidden="true"></span>
+            <span>Approve &amp; Run</span>
+          </button>
+        </div>
       </div>
     </section>
 
@@ -186,8 +241,8 @@
         </section>
 
         <section class="card battle-section">
-          <div class="section-heading">What WARROOM is doing (live)</div>
-          <p class="panel-helper">This shows the control-plane actions WARROOM is taking through MCP.</p>
+          <div class="section-heading">WARROOM control actions</div>
+          <p class="panel-helper">This shows the key actions WARROOM took through MCP during the simulation.</p>
           <ol class="mcp-activity-list" id="mcpActivityList">
             <li class="mcp-activity-item">Initializing failure simulation</li>
             <li class="mcp-activity-item">Preparing container control</li>
@@ -207,7 +262,7 @@
       </button>
       <div class="eyebrow">VERDICT</div>
       <h1>Drill Outcome</h1>
-      <p class="subtitle">WARROOM analyzed the failure using real drill evidence.</p>
+      <p class="subtitle">Technical diagnosis based on live drill evidence, service metrics, and observed failure signals.</p>
 
       <section class="card verdict-hero">
         <div class="verdict-badge verdict-badge-fail" id="verdictBadge">FAIL</div>
@@ -248,7 +303,7 @@
         </section>
 
         <section class="card battle-section">
-          <div class="section-heading">What to do next</div>
+          <div class="section-heading">Technical findings</div>
           <ol class="next-actions-list" id="nextActionsList">
             <li>Restore database availability.</li>
             <li>Add fallback behavior when the database is unreachable.</li>
@@ -298,6 +353,7 @@
       <div class="eyebrow">ACTION PLAN</div>
       <h1>Action Plan</h1>
       <p class="subtitle">Here’s what to do next based on the failure WARROOM observed.</p>
+      <p class="action-plan-framing">You can use the steps below directly as prompt-ready instructions for your AI agents.</p>
 
       <div class="battle-grid">
         <section class="card battle-section">
@@ -308,7 +364,7 @@
         </section>
 
         <section class="card battle-section">
-          <div class="section-heading">Fix in code</div>
+          <div class="section-heading">Fix next</div>
           <ol class="next-actions-list" id="actionPlanFixInCode">
             <li>Preparing resilient code changes from the current verdict.</li>
           </ol>

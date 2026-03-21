@@ -64,6 +64,7 @@ DRILL_STATE = {
     "poll_count": 0,
     "start_time": None,
     "db_container_name": None,
+    "proxy_name": None,
     "timeline": [],
     "logs": [],
     "latencies_ms": [],
@@ -72,6 +73,8 @@ DRILL_STATE = {
     "error_count": 0,
     "db_stop_time": None,
     "first_failure_time": None,
+    "latency_injection_time": None,
+    "latency_delay_time": None,
     "mcp_activity": [],
     "evidence": None,
 }
@@ -84,6 +87,7 @@ def reset_drill_state() -> None:
     DRILL_STATE["poll_count"] = 0
     DRILL_STATE["start_time"] = None
     DRILL_STATE["db_container_name"] = None
+    DRILL_STATE["proxy_name"] = None
     DRILL_STATE["timeline"] = []
     DRILL_STATE["logs"] = []
     DRILL_STATE["latencies_ms"] = []
@@ -92,6 +96,8 @@ def reset_drill_state() -> None:
     DRILL_STATE["error_count"] = 0
     DRILL_STATE["db_stop_time"] = None
     DRILL_STATE["first_failure_time"] = None
+    DRILL_STATE["latency_injection_time"] = None
+    DRILL_STATE["latency_delay_time"] = None
     DRILL_STATE["mcp_activity"] = []
     DRILL_STATE["evidence"] = None
 
@@ -311,6 +317,78 @@ def probe_db_down_status() -> dict:
     }
 
 
+def probe_latency_spike_status() -> dict:
+    health_result = probe_endpoint("GET", f"{APP_BASE_URL}/health")
+    checkout_result = probe_endpoint("POST", f"{APP_BASE_URL}/checkout")
+
+    print(f"[WARROOM backend] health check result={health_result}")
+    print(f"[WARROOM backend] checkout probe result={checkout_result}")
+
+    add_timeline_event("00:00 - Drill started")
+    if DRILL_STATE["latency_injection_time"] is None:
+        DRILL_STATE["latency_injection_time"] = max(elapsed_seconds(), 0)
+    add_timeline_event(
+        f"00:{str(DRILL_STATE['latency_injection_time']).zfill(2)} - Latency injection applied"
+    )
+
+    DRILL_STATE["probe_count"] += 2
+    for result in (health_result, checkout_result):
+        DRILL_STATE["latencies_ms"].append(result["latency_ms"])
+        if result["ok"]:
+            DRILL_STATE["success_count"] += 1
+        else:
+            DRILL_STATE["error_count"] += 1
+
+    if checkout_result["latency_ms"] >= 800:
+        if DRILL_STATE["latency_delay_time"] is None:
+            DRILL_STATE["latency_delay_time"] = max(
+                elapsed_seconds(),
+                DRILL_STATE["latency_injection_time"] or 0,
+            )
+        add_timeline_event(
+            f"00:{str(DRILL_STATE['latency_delay_time']).zfill(2)} - Checkout response delay increased"
+        )
+        append_log(f"[proxy] injected database latency via {DRILL_STATE['proxy_name'] or 'warroom-db-proxy'}")
+
+    if not checkout_result["ok"] and DRILL_STATE["first_failure_time"] is None:
+        DRILL_STATE["first_failure_time"] = max(
+            elapsed_seconds(),
+            DRILL_STATE["latency_delay_time"] or DRILL_STATE["latency_injection_time"] or 1,
+            1,
+        )
+        add_timeline_event(
+            f"00:{str(DRILL_STATE['first_failure_time']).zfill(2)} - First 5xx response"
+        )
+
+    if DRILL_STATE["error_count"] >= 2:
+        add_timeline_event("00:05 - Error rate increasing")
+
+    if DRILL_STATE["poll_count"] >= 5:
+        add_timeline_event("00:10 - Drill complete")
+
+    success_rate = int(
+        round((DRILL_STATE["success_count"] / max(DRILL_STATE["probe_count"], 1)) * 100)
+    )
+    p95_latency = latency_p95(DRILL_STATE["latencies_ms"])
+    append_log(
+        f"[metrics] success_rate={success_rate} "
+        f"error_count={DRILL_STATE['error_count']} p95_latency={p95_latency}"
+    )
+
+    app_status = "degraded" if (p95_latency >= 800 or not health_result["ok"] or not checkout_result["ok"]) else "running"
+    db_status = "running"
+
+    return {
+        "app_status": app_status,
+        "db_status": db_status,
+        "success_rate": success_rate,
+        "error_count": DRILL_STATE["error_count"],
+        "p95_latency": p95_latency,
+        "first_failure_time": DRILL_STATE["first_failure_time"],
+        "timeline": list(DRILL_STATE["timeline"]),
+    }
+
+
 def classify_fear_with_ollama(fear: str) -> str:
     print("[WARROOM backend] starting Ollama classification")
 
@@ -437,6 +515,36 @@ def build_real_db_down_evidence() -> dict:
             "unavailable."
         ),
         "logs": list(DRILL_STATE["logs"]),
+        "timeline": list(DRILL_STATE["timeline"]),
+    }
+
+
+def build_real_latency_evidence() -> dict:
+    success_rate = max(
+        0,
+        min(100, int(round((DRILL_STATE["success_count"] / max(DRILL_STATE["probe_count"], 1)) * 100))),
+    )
+    p95_latency = latency_p95(DRILL_STATE["latencies_ms"])
+
+    return {
+        "success_rate": success_rate,
+        "p95_latency": p95_latency,
+        "error_count": DRILL_STATE["error_count"],
+        "first_failure_time": DRILL_STATE["first_failure_time"],
+        "likely_cause": (
+            "Checkout slowed because database requests were artificially delayed, "
+            "and the application had limited protection against dependency latency."
+        ),
+        "suggested_fix": (
+            "Add tighter timeouts, bounded retries, and circuit-breaker or fallback "
+            "behavior so slow database calls do not degrade checkout."
+        ),
+        "summary": (
+            "The drill indicates database latency increased checkout response times "
+            "and degraded the user experience."
+        ),
+        "logs": list(DRILL_STATE["logs"]),
+        "timeline": list(DRILL_STATE["timeline"]),
     }
 
 
@@ -774,6 +882,13 @@ def build_evidence(drill_type: str) -> dict:
                 "[db] container stopped",
                 "[metrics] success_rate=72 error_count=38 p95_latency=1240",
             ],
+            "timeline": [
+                "00:00 - Drill started",
+                "00:02 - warroom-db stopped",
+                "00:03 - First 5xx response",
+                "00:05 - Error rate increasing",
+                "00:10 - Drill complete",
+            ],
         }
 
     if drill_type == "latency_spike":
@@ -790,6 +905,12 @@ def build_evidence(drill_type: str) -> dict:
                 "[app] GET /checkout -> 504 upstream timeout",
                 "[metrics] success_rate=88 error_count=7 p95_latency=920",
             ],
+            "timeline": [
+                "00:00 - Drill started",
+                "00:02 - Latency injection applied",
+                "00:02 - Checkout response delay increased",
+                "00:10 - Drill complete",
+            ],
         }
 
     return {
@@ -804,6 +925,12 @@ def build_evidence(drill_type: str) -> dict:
             "[load] request flood started",
             "[app] POST /checkout -> 503 overloaded",
             "[metrics] success_rate=84 error_count=14 p95_latency=510",
+        ],
+        "timeline": [
+            "00:00 - Drill started",
+            "00:03 - request volume increasing",
+            "00:05 - Error rate increasing",
+            "00:10 - Drill complete",
         ],
     }
 
@@ -869,7 +996,7 @@ def start_drill(request: StartDrillRequest):
     DRILL_STATE["poll_count"] = 0
     DRILL_STATE["start_time"] = time.time()
 
-    if request.drill_type == "db_down":
+    if request.drill_type in {"db_down", "latency_spike"}:
         result = call_mcp_tool(
             "run_drill",
             {
@@ -879,14 +1006,13 @@ def start_drill(request: StartDrillRequest):
             },
         )
         DRILL_STATE["db_container_name"] = result.get("container")
+        DRILL_STATE["proxy_name"] = result.get("proxy")
         DRILL_STATE["mcp_activity"] = result.get("mcp_activity", [])
-        DRILL_STATE["mcp_activity"].append("MCP monitoring active")
-        DRILL_STATE["mcp_activity"] = DRILL_STATE["mcp_activity"][-8:]
         DRILL_STATE["timeline"] = ["00:00 - Drill started"]
         print(
             f"[WARROOM backend] drill start "
             f"drill_id={drill_id} drill_type={request.drill_type} "
-            f"container={DRILL_STATE['db_container_name']}"
+            f"container={DRILL_STATE['db_container_name']} proxy={DRILL_STATE['proxy_name']}"
         )
     else:
         DRILL_STATE["evidence"] = build_evidence(request.drill_type)
@@ -941,6 +1067,10 @@ def drill_status():
         snapshot = probe_db_down_status()
         if DRILL_STATE["status"] == "complete":
             DRILL_STATE["evidence"] = build_real_db_down_evidence()
+    elif DRILL_STATE["drill_type"] == "latency_spike":
+        snapshot = probe_latency_spike_status()
+        if DRILL_STATE["status"] == "complete":
+            DRILL_STATE["evidence"] = build_real_latency_evidence()
     else:
         snapshot = build_battle_snapshot(
             DRILL_STATE["drill_type"],
@@ -962,9 +1092,12 @@ def drill_evidence():
         f"drill_id={DRILL_STATE['drill_id']} status={DRILL_STATE['status']}"
     )
 
-    if DRILL_STATE["drill_type"] == "db_down" and DRILL_STATE["status"] != "idle":
-        print("[WARROOM backend] evidence fetch for real db_down drill")
-        evidence = DRILL_STATE["evidence"] or build_real_db_down_evidence()
+    if DRILL_STATE["drill_type"] in {"db_down", "latency_spike"} and DRILL_STATE["status"] != "idle":
+        print(f"[WARROOM backend] evidence fetch for real {DRILL_STATE['drill_type']} drill")
+        if DRILL_STATE["drill_type"] == "db_down":
+            evidence = DRILL_STATE["evidence"] or build_real_db_down_evidence()
+        else:
+            evidence = DRILL_STATE["evidence"] or build_real_latency_evidence()
         ollama_input = {
             "drill_type": DRILL_STATE["drill_type"],
             "success_rate": evidence["success_rate"],
@@ -1002,8 +1135,11 @@ def drill_action_plan():
         f"drill_id={DRILL_STATE['drill_id']} status={DRILL_STATE['status']}"
     )
 
-    if DRILL_STATE["drill_type"] == "db_down" and DRILL_STATE["status"] != "idle":
-        evidence = DRILL_STATE["evidence"] or build_real_db_down_evidence()
+    if DRILL_STATE["drill_type"] in {"db_down", "latency_spike"} and DRILL_STATE["status"] != "idle":
+        if DRILL_STATE["drill_type"] == "db_down":
+            evidence = DRILL_STATE["evidence"] or build_real_db_down_evidence()
+        else:
+            evidence = DRILL_STATE["evidence"] or build_real_latency_evidence()
     else:
         evidence = DRILL_STATE["evidence"] or build_evidence(
             DRILL_STATE["drill_type"] or "db_down"
@@ -1033,7 +1169,7 @@ def drill_action_plan():
 def reset_drill():
     print(f"[WARROOM backend] POST /drill/reset drill_id={DRILL_STATE['drill_id']}")
 
-    if DRILL_STATE["drill_type"] == "db_down":
+    if DRILL_STATE["drill_type"] in {"db_down", "latency_spike"}:
         result = call_mcp_tool(
             "reset",
             {
@@ -1044,7 +1180,7 @@ def reset_drill():
         print(
             f"[WARROOM backend] reset success "
             f"drill_id={DRILL_STATE['drill_id']} "
-            f"container={result.get('container')}"
+            f"container={result.get('container')} proxy={result.get('proxy')}"
         )
 
     reset_drill_state()

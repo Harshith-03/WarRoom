@@ -9,6 +9,8 @@ from pydantic import BaseModel
 
 
 APP_BASE_URL = "http://127.0.0.1:5001"
+TOXIPROXY_BASE_URL = "http://127.0.0.1:8474"
+DB_PROXY_NAME = "warroom-db-proxy"
 
 app = FastAPI(title="WARROOM MCP Server")
 mcp = FastMCP("WARROOM MCP")
@@ -16,6 +18,7 @@ mcp = FastMCP("WARROOM MCP")
 MCP_STATE = {
     "drill_type": None,
     "container": None,
+    "proxy": None,
     "last_action": None,
     "activity": [],
 }
@@ -127,6 +130,87 @@ def wait_for_demo_health(timeout_seconds: int = 15) -> None:
     )
 
 
+def resolve_db_proxy_name() -> str:
+    try:
+        response = requests.get(f"{TOXIPROXY_BASE_URL}/proxies", timeout=5)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not inspect Toxiproxy proxies: {exc}",
+        ) from exc
+
+    proxies = response.json()
+    if isinstance(proxies, dict) and DB_PROXY_NAME in proxies:
+        print(f"[WARROOM MCP] resolved proxy={DB_PROXY_NAME}")
+        record_activity(f"MCP resolved {DB_PROXY_NAME}")
+        return DB_PROXY_NAME
+
+    raise HTTPException(
+        status_code=500,
+        detail=f"Could not find Toxiproxy proxy named {DB_PROXY_NAME}.",
+    )
+
+
+def inject_latency_toxic(proxy_name: str, latency_ms: int = 800) -> None:
+    try:
+        response = requests.post(
+            f"{TOXIPROXY_BASE_URL}/proxies/{proxy_name}/toxics",
+            json={
+                "name": "latency",
+                "type": "latency",
+                "attributes": {
+                    "latency": latency_ms,
+                },
+            },
+            timeout=5,
+        )
+        if response.status_code == 409:
+            delete_latency_toxic(proxy_name, raise_if_missing=False)
+            response = requests.post(
+                f"{TOXIPROXY_BASE_URL}/proxies/{proxy_name}/toxics",
+                json={
+                    "name": "latency",
+                    "type": "latency",
+                    "attributes": {
+                        "latency": latency_ms,
+                    },
+                },
+                timeout=5,
+            )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not inject latency toxic: {exc}",
+        ) from exc
+
+    print(f"[WARROOM MCP] injected {latency_ms}ms latency")
+    record_activity(f"MCP injected {latency_ms}ms latency")
+
+
+def delete_latency_toxic(proxy_name: str, raise_if_missing: bool = True) -> None:
+    try:
+        response = requests.delete(
+            f"{TOXIPROXY_BASE_URL}/proxies/{proxy_name}/toxics/latency",
+            timeout=5,
+        )
+        if response.status_code == 404 and not raise_if_missing:
+            return
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        if not raise_if_missing and getattr(exc, "response", None) is not None:
+            if exc.response.status_code == 404:
+                return
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not remove latency toxic: {exc}",
+        ) from exc
+
+    print("[WARROOM MCP] removed latency toxic")
+    record_activity("MCP removed latency toxic")
+
+
 def run_drill_impl(
     drill_type: Literal["db_down", "latency_spike", "request_flood"],
     duration: str | None = None,
@@ -148,6 +232,23 @@ def run_drill_impl(
             "drill_type": drill_type,
             "action": "stopped database container",
             "container": container_name,
+            "mcp_activity": list(MCP_STATE["activity"]),
+            "duration": duration,
+            "intensity": intensity,
+        }
+
+    if drill_type == "latency_spike":
+        proxy_name = resolve_db_proxy_name()
+        MCP_STATE["proxy"] = proxy_name
+        inject_latency_toxic(proxy_name, latency_ms=800)
+        record_activity("MCP monitoring active")
+        MCP_STATE["last_action"] = "injected database latency"
+        return {
+            "ok": True,
+            "drill_type": drill_type,
+            "action": "injected database latency",
+            "proxy": proxy_name,
+            "latency_ms": 800,
             "mcp_activity": list(MCP_STATE["activity"]),
             "duration": duration,
             "intensity": intensity,
@@ -179,6 +280,18 @@ def reset_impl(drill_id: str | None = None) -> dict:
             "ok": True,
             "action": "environment reset",
             "container": container_name,
+            "mcp_activity": list(MCP_STATE["activity"]),
+        }
+
+    if MCP_STATE["drill_type"] == "latency_spike":
+        proxy_name = MCP_STATE["proxy"] or resolve_db_proxy_name()
+        delete_latency_toxic(proxy_name, raise_if_missing=False)
+        MCP_STATE["last_action"] = "environment reset"
+        return {
+            "ok": True,
+            "action": "environment reset",
+            "container": MCP_STATE["container"],
+            "proxy": proxy_name,
             "mcp_activity": list(MCP_STATE["activity"]),
         }
 
