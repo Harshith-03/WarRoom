@@ -1,6 +1,10 @@
+import subprocess
+import time
 from typing import Literal
 
-from fastapi import FastAPI
+import requests
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -53,8 +57,250 @@ DRILL_STATE = {
     "drill_type": None,
     "status": "idle",
     "poll_count": 0,
+    "start_time": None,
+    "db_container_name": None,
+    "timeline": [],
+    "logs": [],
+    "latencies_ms": [],
+    "success_count": 0,
+    "probe_count": 0,
+    "error_count": 0,
+    "first_failure_time": None,
     "evidence": None,
 }
+
+
+def reset_drill_state() -> None:
+    DRILL_STATE["drill_id"] = None
+    DRILL_STATE["drill_type"] = None
+    DRILL_STATE["status"] = "idle"
+    DRILL_STATE["poll_count"] = 0
+    DRILL_STATE["start_time"] = None
+    DRILL_STATE["db_container_name"] = None
+    DRILL_STATE["timeline"] = []
+    DRILL_STATE["logs"] = []
+    DRILL_STATE["latencies_ms"] = []
+    DRILL_STATE["success_count"] = 0
+    DRILL_STATE["probe_count"] = 0
+    DRILL_STATE["error_count"] = 0
+    DRILL_STATE["first_failure_time"] = None
+    DRILL_STATE["evidence"] = None
+
+
+def run_podman_command(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["podman", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def resolve_db_container_name() -> str:
+    result = run_podman_command("ps", "-a", "--format", "{{.Names}}")
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not inspect Podman containers: {result.stderr.strip()}",
+        )
+
+    names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    matches = [name for name in names if "warroom-db" in name]
+
+    if not matches:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not find a Podman container matching warroom-db.",
+        )
+
+    def score(name: str) -> tuple[int, int]:
+        if name == "warroom-db":
+            return (0, len(name))
+        if name.startswith("warroom-db"):
+            return (1, len(name))
+        if name.endswith("warroom-db") or name.endswith("_warroom-db_1"):
+            return (2, len(name))
+        return (3, len(name))
+
+    container_name = sorted(matches, key=score)[0]
+    print(f"[WARROOM backend] resolved container name={container_name}")
+    return container_name
+
+
+def container_is_running(container_name: str) -> bool:
+    result = run_podman_command("inspect", "-f", "{{.State.Running}}", container_name)
+    if result.returncode != 0:
+        return False
+    return result.stdout.strip().lower() == "true"
+
+
+def stop_container(container_name: str) -> None:
+    result = run_podman_command("stop", container_name)
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not stop container {container_name}: {result.stderr.strip()}",
+        )
+
+
+def start_container(container_name: str) -> None:
+    result = run_podman_command("start", container_name)
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not start container {container_name}: {result.stderr.strip()}",
+        )
+
+
+def add_timeline_event(event: str) -> None:
+    if event not in DRILL_STATE["timeline"]:
+        DRILL_STATE["timeline"].append(event)
+
+
+def append_log(line: str) -> None:
+    if line not in DRILL_STATE["logs"]:
+        DRILL_STATE["logs"].append(line)
+
+
+def elapsed_seconds() -> int:
+    if not DRILL_STATE["start_time"]:
+        return 0
+    return max(int(time.time() - DRILL_STATE["start_time"]), 0)
+
+
+def latency_p95(latencies_ms: list[float]) -> int:
+    if not latencies_ms:
+        return 120
+    sorted_values = sorted(latencies_ms)
+    index = max(int(0.95 * (len(sorted_values) - 1)), 0)
+    return int(sorted_values[index])
+
+
+def probe_endpoint(method: str, url: str) -> dict:
+    started_at = time.perf_counter()
+    try:
+        response = requests.request(method, url, timeout=2)
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        payload = None
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = response.text.strip()
+
+        ok = 200 <= response.status_code < 400
+        return {
+            "ok": ok,
+            "status_code": response.status_code,
+            "latency_ms": latency_ms,
+            "payload": payload,
+            "error": None,
+        }
+    except requests.RequestException as exc:
+        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        return {
+            "ok": False,
+            "status_code": None,
+            "latency_ms": latency_ms,
+            "payload": None,
+            "error": str(exc),
+        }
+
+
+def probe_db_down_status() -> dict:
+    container_name = DRILL_STATE["db_container_name"]
+    db_running = container_is_running(container_name)
+    health_result = probe_endpoint("GET", "http://127.0.0.1:5000/health")
+    checkout_result = probe_endpoint("POST", "http://127.0.0.1:5000/checkout")
+
+    print(f"[WARROOM backend] health check result={health_result}")
+    print(f"[WARROOM backend] checkout probe result={checkout_result}")
+
+    add_timeline_event("00:00 - Drill started")
+    DRILL_STATE["probe_count"] += 2
+
+    for result in (health_result, checkout_result):
+        DRILL_STATE["latencies_ms"].append(result["latency_ms"])
+        if result["ok"]:
+            DRILL_STATE["success_count"] += 1
+        else:
+            DRILL_STATE["error_count"] += 1
+            if DRILL_STATE["first_failure_time"] is None:
+                DRILL_STATE["first_failure_time"] = max(elapsed_seconds(), 3)
+
+    if not db_running:
+        add_timeline_event("00:02 - warroom-db stopped")
+        append_log("[db] container stopped")
+
+    if not checkout_result["ok"]:
+        add_timeline_event("00:03 - First 5xx response")
+        append_log("[app] POST /checkout -> 500 database unavailable")
+
+    if DRILL_STATE["error_count"] >= 2:
+        add_timeline_event("00:05 - Error rate increasing")
+
+    if DRILL_STATE["poll_count"] >= 5:
+        add_timeline_event("00:10 - Drill complete")
+
+    success_rate = int(
+        round((DRILL_STATE["success_count"] / max(DRILL_STATE["probe_count"], 1)) * 100)
+    )
+    p95_latency = latency_p95(DRILL_STATE["latencies_ms"])
+
+    append_log(
+        f"[metrics] success_rate={success_rate} "
+        f"error_count={DRILL_STATE['error_count']} p95_latency={p95_latency}"
+    )
+
+    app_status = "running" if health_result["ok"] else "degraded"
+    db_status = "running" if db_running else "stopped"
+
+    return {
+        "app_status": app_status,
+        "db_status": db_status,
+        "success_rate": success_rate,
+        "error_count": DRILL_STATE["error_count"],
+        "p95_latency": p95_latency,
+        "first_failure_time": DRILL_STATE["first_failure_time"],
+        "timeline": list(DRILL_STATE["timeline"]),
+    }
+
+
+def build_real_db_down_evidence() -> dict:
+    success_rate = max(0, min(100, int(round(
+        (DRILL_STATE["success_count"] / max(DRILL_STATE["probe_count"], 1)) * 100
+    ))))
+    p95_latency = latency_p95(DRILL_STATE["latencies_ms"])
+
+    return {
+        "success_rate": success_rate,
+        "p95_latency": p95_latency,
+        "error_count": DRILL_STATE["error_count"],
+        "first_failure_time": DRILL_STATE["first_failure_time"],
+        "likely_cause": (
+            "Checkout requests failed because the database became unavailable "
+            "and no graceful fallback existed."
+        ),
+        "suggested_fix": (
+            "Add retry handling, circuit breaker logic, and graceful fallback "
+            "when the database is unreachable."
+        ),
+        "logs": list(DRILL_STATE["logs"]),
+    }
+
+
+def wait_for_demo_health(timeout_seconds: int = 15) -> None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        result = probe_endpoint("GET", "http://127.0.0.1:5000/health")
+        print(f"[WARROOM backend] health check result={result}")
+        if result["ok"]:
+            return
+        time.sleep(1)
+
+    raise HTTPException(
+        status_code=500,
+        detail="Demo app health endpoint did not recover after resetting the drill.",
+    )
 
 
 def build_battle_snapshot(drill_type: str, poll_count: int) -> dict:
@@ -289,16 +535,30 @@ def classify(request: ClassifyRequest):
 @app.post("/drill/start")
 def start_drill(request: StartDrillRequest):
     drill_id = "demo-drill-1"
+    reset_drill_state()
     DRILL_STATE["drill_id"] = drill_id
     DRILL_STATE["drill_type"] = request.drill_type
     DRILL_STATE["status"] = "running"
     DRILL_STATE["poll_count"] = 0
-    DRILL_STATE["evidence"] = build_evidence(request.drill_type)
+    DRILL_STATE["start_time"] = time.time()
 
-    print(
-        f"[WARROOM backend] POST /drill/start "
-        f"drill_id={drill_id} drill_type={request.drill_type}"
-    )
+    if request.drill_type == "db_down":
+        container_name = resolve_db_container_name()
+        DRILL_STATE["db_container_name"] = container_name
+        DRILL_STATE["timeline"] = ["00:00 - Drill started"]
+        stop_container(container_name)
+        print(
+            f"[WARROOM backend] drill start "
+            f"drill_id={drill_id} drill_type={request.drill_type} "
+            f"container={container_name}"
+        )
+    else:
+        DRILL_STATE["evidence"] = build_evidence(request.drill_type)
+        print(
+            f"[WARROOM backend] drill start "
+            f"drill_id={drill_id} drill_type={request.drill_type}"
+        )
+
     return {
         "drill_id": drill_id,
         "status": "started",
@@ -340,10 +600,15 @@ def drill_status():
             f"drill_id={DRILL_STATE['drill_id']} poll_count={DRILL_STATE['poll_count']}"
         )
 
-    snapshot = build_battle_snapshot(
-        DRILL_STATE["drill_type"],
-        DRILL_STATE["poll_count"],
-    )
+    if DRILL_STATE["drill_type"] == "db_down":
+        snapshot = probe_db_down_status()
+        if DRILL_STATE["status"] == "complete":
+            DRILL_STATE["evidence"] = build_real_db_down_evidence()
+    else:
+        snapshot = build_battle_snapshot(
+            DRILL_STATE["drill_type"],
+            DRILL_STATE["poll_count"],
+        )
 
     return {
         "drill_id": DRILL_STATE["drill_id"],
@@ -358,6 +623,10 @@ def drill_evidence():
         f"[WARROOM backend] GET /drill/evidence "
         f"drill_id={DRILL_STATE['drill_id']} status={DRILL_STATE['status']}"
     )
+
+    if DRILL_STATE["drill_type"] == "db_down" and DRILL_STATE["status"] != "idle":
+        print("[WARROOM backend] evidence fetch for real db_down drill")
+        return DRILL_STATE["evidence"] or build_real_db_down_evidence()
 
     if not DRILL_STATE["evidence"]:
         return {
@@ -376,9 +645,15 @@ def drill_evidence():
 @app.post("/drill/reset")
 def reset_drill():
     print(f"[WARROOM backend] POST /drill/reset drill_id={DRILL_STATE['drill_id']}")
-    DRILL_STATE["drill_id"] = None
-    DRILL_STATE["drill_type"] = None
-    DRILL_STATE["status"] = "idle"
-    DRILL_STATE["poll_count"] = 0
-    DRILL_STATE["evidence"] = None
+
+    if DRILL_STATE["drill_type"] == "db_down":
+        container_name = DRILL_STATE["db_container_name"] or resolve_db_container_name()
+        start_container(container_name)
+        wait_for_demo_health()
+        print(
+            f"[WARROOM backend] reset success "
+            f"drill_id={DRILL_STATE['drill_id']} container={container_name}"
+        )
+
+    reset_drill_state()
     return {"status": "reset"}
