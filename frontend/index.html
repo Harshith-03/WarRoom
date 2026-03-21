@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WARROOM</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="screen-panel" id="screen1">
+      <div class="eyebrow">WARROOM</div>
+      <h1>What breaks your app?</h1>
+      <p class="subtitle">Describe the production fear you want to drill. We will classify it and prepare the blast radius preview.</p>
+
+      <input
+        type="text"
+        id="fearInput"
+        placeholder="e.g. What if my database goes down during checkout?"
+        autocomplete="off"
+      >
+
+      <div class="chips">
+        <button type="button" class="chip-button" onclick="setFear('Database goes down during checkout')">Database goes down</button>
+        <button type="button" class="chip-button" onclick="setFear('Traffic flood hits checkout requests')">Requests flood checkout</button>
+        <button type="button" class="chip-button" onclick="setFear('Database gets slow and latency spikes')">Database gets slow</button>
+      </div>
+
+      <button type="button" class="primary-button" id="runBtn" onclick="runDrill()">Run Drill</button>
+    </section>
+
+    <section class="screen-panel hidden" id="screen2">
+      <div class="eyebrow">Approval</div>
+      <h1>Confirm Blast Radius</h1>
+      <p class="subtitle">Review the detected drill before the exercise begins.</p>
+
+      <div class="card">
+        <div class="detail-row">
+          <span class="detail-label">Detected Drill</span>
+          <span class="detail-value" id="drillType"></span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Target Service</span>
+          <span class="detail-value" id="targetService"></span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Duration</span>
+          <span class="detail-value" id="duration"></span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">Expected Impact</span>
+          <span class="detail-value" id="impact"></span>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="secondary-button" onclick="goBack()">Cancel</button>
+        <button type="button" class="primary-button" onclick="approveRun()">Approve &amp; Run</button>
+      </div>
+    </section>
+
+    <section class="screen-panel hidden battle-screen" id="screen3">
+      <div class="eyebrow status-live">LIVE DRILL</div>
+      <div class="battle-topbar">
+        <div>
+          <h1>System Under Stress</h1>
+          <p class="subtitle">WARROOM is executing the approved resilience drill.</p>
+        </div>
+        <button type="button" class="secondary-button abort-button" onclick="abortDrill()">Abort Drill</button>
+      </div>
+
+      <div class="battle-grid">
+        <section class="card battle-section">
+          <div class="section-heading">Service Status</div>
+          <div class="service-grid">
+            <article class="service-card">
+              <div class="service-card-top">
+                <span class="service-name">warroom-app</span>
+                <span class="status-pill" id="appStatusPill">
+                  <span class="status-dot status-running" id="appStatusDot"></span>
+                  <span id="appStatusText">running</span>
+                </span>
+              </div>
+              <p class="service-copy">Application traffic and request handling.</p>
+            </article>
+
+            <article class="service-card">
+              <div class="service-card-top">
+                <span class="service-name">warroom-db</span>
+                <span class="status-pill" id="dbStatusPill">
+                  <span class="status-dot status-running" id="dbStatusDot"></span>
+                  <span id="dbStatusText">running</span>
+                </span>
+              </div>
+              <p class="service-copy">Primary database backing checkout state.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="card battle-section">
+          <div class="section-heading">Live Metrics</div>
+          <div class="metrics-grid">
+            <div class="metric-card">
+              <span class="metric-label">Success Rate</span>
+              <strong class="metric-value" id="successRate">100%</strong>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Error Count</span>
+              <strong class="metric-value" id="errorCount">0</strong>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">P95 Latency</span>
+              <strong class="metric-value" id="p95Latency">120ms</strong>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">First Failure</span>
+              <strong class="metric-value" id="firstFailure">--</strong>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="battle-grid single-column">
+        <section class="card battle-section">
+          <div class="section-heading">Event Timeline</div>
+          <div class="timeline-list" id="timelineList">
+            <div class="timeline-item">
+              <span class="timeline-time">00:00</span>
+              <span class="timeline-text">Drill started</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="card battle-section">
+          <div class="section-heading">Progress</div>
+          <div class="progress-track">
+            <div class="progress-bar" id="progressBar"></div>
+          </div>
+          <p class="progress-text" id="drillStatusText">Drill in progress...</p>
+        </section>
+      </div>
+    </section>
+
+    <section class="screen-panel hidden" id="screen4">
+      <div class="eyebrow">VERDICT</div>
+      <h1>Drill Outcome</h1>
+      <p class="subtitle">WARROOM analyzed the failure using real drill evidence.</p>
+
+      <section class="card verdict-hero">
+        <div class="verdict-badge verdict-badge-fail" id="verdictBadge">FAIL</div>
+        <div class="verdict-copy">
+          <div class="section-heading">Result</div>
+          <p class="verdict-summary" id="verdictSummary">The system did not handle the dependency failure safely.</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-heading">Final Metrics</div>
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <span class="metric-label">Success Rate</span>
+            <strong class="metric-value" id="verdictSuccessRate">--</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">P95 Latency</span>
+            <strong class="metric-value" id="verdictP95Latency">--</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Error Count</span>
+            <strong class="metric-value" id="verdictErrorCount">--</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">First Failure</span>
+            <strong class="metric-value" id="verdictFirstFailure">--</strong>
+          </div>
+        </div>
+      </section>
+
+      <div class="battle-grid">
+        <section class="card battle-section">
+          <div class="section-heading">Likely Cause</div>
+          <p class="verdict-text" id="likelyCause">
+            Checkout requests failed because the database service became unavailable and no graceful fallback existed.
+          </p>
+        </section>
+
+        <section class="card battle-section">
+          <div class="section-heading">Suggested Fix</div>
+          <p class="verdict-text" id="suggestedFix">
+            Add retry protection, a circuit breaker, and a graceful fallback path when the database is unreachable.
+          </p>
+        </section>
+      </div>
+
+      <section class="card">
+        <div class="evidence-header">
+          <div class="section-heading evidence-title">Evidence</div>
+          <button type="button" class="secondary-button evidence-toggle" id="evidenceToggle" onclick="toggleEvidence()">
+            Show Evidence
+          </button>
+        </div>
+
+        <div class="evidence-panel hidden" id="evidencePanel">
+          <div class="evidence-block">
+            <div class="evidence-subheading">Timeline</div>
+            <pre class="evidence-pre" id="evidenceTimeline"></pre>
+          </div>
+          <div class="evidence-block">
+            <div class="evidence-subheading">Logs</div>
+            <pre class="evidence-pre" id="evidenceLogs"></pre>
+          </div>
+          <div class="evidence-block">
+            <div class="evidence-subheading">Metrics Snapshot</div>
+            <pre class="evidence-pre" id="evidenceMetrics"></pre>
+          </div>
+        </div>
+      </section>
+
+      <div class="actions">
+        <button type="button" class="primary-button" onclick="resetToStart()">Reset &amp; Try Another</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
