@@ -9,7 +9,7 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-
+#Few passwords
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "warroom-db-proxy")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5433"))
 POSTGRES_USER = os.getenv("POSTGRES_USER", "warroom")

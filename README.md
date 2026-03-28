@@ -121,7 +121,7 @@ Simulate the database going offline and observe:
 
 - checkout failures
 - application degradation
-- full loss of functionality in critical flows
+- Full loss of functionality in critical flows
 
 ### Latency Injection
 
