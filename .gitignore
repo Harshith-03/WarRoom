@@ -1,3 +1,30 @@
 __pycache__/
 *.pyc
 .venv/
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment and local config
+.env
+.env.*
+
+# IDE / OS noise
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# Logs and runtime artifacts
+*.log
+*.pid
+
+# Build artifacts
+dist/
+build/

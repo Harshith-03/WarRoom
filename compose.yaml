@@ -55,15 +55,61 @@ services:
 
   warroom-backend:
     image: python:3.11-slim
-    command: ["sh", "-c", "echo \"backend placeholder - Member A will replace\""]
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+    environment:
+      MCP_BASE_URL: http://warroom-mcp:9100
+      APP_BASE_URL: http://warroom-app:5000
+    command:
+      - sh
+      - -c
+      - |
+        pip install --no-cache-dir -r requirements.txt &&
+        uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
+    depends_on:
+      - warroom-mcp
+      - warroom-app
     networks:
       - warroom-net
 
   warroom-mcp:
     image: python:3.11-slim
-    command: ["sh", "-c", "echo \"mcp placeholder - Member A will replace\""]
+    working_dir: /app
+    volumes:
+      - ./mcp-server:/app
+    command:
+      - sh
+      - -c
+      - |
+        pip install --no-cache-dir -r requirements.txt &&
+        uvicorn server:app --host 0.0.0.0 --port 9100
+    ports:
+      - "9100:9100"
+    depends_on:
+      - warroom-toxiproxy
+      - warroom-db
+      - warroom-app
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:9100/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - warroom-net
+
+  warroom-frontend:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    command: ["python", "-m", "http.server", "5500"]
+    ports:
+      - "5500:5500"
+    depends_on:
+      - warroom-backend
     networks:
       - warroom-net
 

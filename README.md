@@ -144,7 +144,7 @@ Apply load to the system and observe:
 ### Start the System
 
 ```bash
-podman compose up
+podman compose up --build
 ```
 
 ### Verify Services
@@ -165,15 +165,16 @@ uvicorn main:app --reload
 
 ```bash
 cd mcp-server
-source .venv/bin/activate
-uvicorn server:app --port 9100
+uvicorn server:app --host 127.0.0.1 --port 9100
 ```
 
 ### Open Frontend
 
 ```bash
-open frontend/index.html
+python -m http.server 5500 --directory frontend
 ```
+
+Then open http://127.0.0.1:5500 in your browser.
 
 ## Architecture Overview
 
