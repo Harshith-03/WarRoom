@@ -25,7 +25,15 @@ MCP_STATE = {
 
 
 class RunDrillInput(BaseModel):
-    drill_type: Literal["db_down", "latency_spike", "request_flood"]
+    drill_type: Literal[
+        "db_down",
+        "latency_spike",
+        "request_flood",
+        "credential_exposure",
+        "pii_exposure",
+        "dependency_api_failure",
+        "ai_risk_suite",
+    ]
     duration: str | None = None
     intensity: str | None = None
 
@@ -212,7 +220,15 @@ def delete_latency_toxic(proxy_name: str, raise_if_missing: bool = True) -> None
 
 
 def run_drill_impl(
-    drill_type: Literal["db_down", "latency_spike", "request_flood"],
+    drill_type: Literal[
+        "db_down",
+        "latency_spike",
+        "request_flood",
+        "credential_exposure",
+        "pii_exposure",
+        "dependency_api_failure",
+        "ai_risk_suite",
+    ],
     duration: str | None = None,
     intensity: str | None = None,
 ) -> dict:
@@ -249,6 +265,62 @@ def run_drill_impl(
             "action": "injected database latency",
             "proxy": proxy_name,
             "latency_ms": 800,
+            "mcp_activity": list(MCP_STATE["activity"]),
+            "duration": duration,
+            "intensity": intensity,
+        }
+
+    if drill_type == "credential_exposure":
+        record_activity("MCP enabled credential exposure simulation")
+        record_activity("MCP tracking auth and secret handling signals")
+        MCP_STATE["last_action"] = "simulated credential exposure risk"
+        return {
+            "ok": True,
+            "drill_type": drill_type,
+            "action": "simulated credential exposure risk",
+            "container": None,
+            "mcp_activity": list(MCP_STATE["activity"]),
+            "duration": duration,
+            "intensity": intensity,
+        }
+
+    if drill_type == "pii_exposure":
+        record_activity("MCP enabled PII exposure simulation")
+        record_activity("MCP tracking sensitive data boundary events")
+        MCP_STATE["last_action"] = "simulated pii exposure risk"
+        return {
+            "ok": True,
+            "drill_type": drill_type,
+            "action": "simulated pii exposure risk",
+            "container": None,
+            "mcp_activity": list(MCP_STATE["activity"]),
+            "duration": duration,
+            "intensity": intensity,
+        }
+
+    if drill_type == "dependency_api_failure":
+        record_activity("MCP enabled dependency API failure simulation")
+        record_activity("MCP observing fallback behavior under upstream outage")
+        MCP_STATE["last_action"] = "simulated dependency api failure"
+        return {
+            "ok": True,
+            "drill_type": drill_type,
+            "action": "simulated dependency api failure",
+            "container": None,
+            "mcp_activity": list(MCP_STATE["activity"]),
+            "duration": duration,
+            "intensity": intensity,
+        }
+
+    if drill_type == "ai_risk_suite":
+        record_activity("MCP launched AI risk suite orchestration")
+        record_activity("MCP scheduled tests: credentials, pii, dependency")
+        MCP_STATE["last_action"] = "simulated ai risk suite"
+        return {
+            "ok": True,
+            "drill_type": drill_type,
+            "action": "simulated ai risk suite",
+            "container": None,
             "mcp_activity": list(MCP_STATE["activity"]),
             "duration": duration,
             "intensity": intensity,
@@ -318,7 +390,15 @@ def get_evidence_impl(drill_id: str) -> dict:
 
 @mcp.tool()
 def run_drill(
-    drill_type: Literal["db_down", "latency_spike", "request_flood"],
+    drill_type: Literal[
+        "db_down",
+        "latency_spike",
+        "request_flood",
+        "credential_exposure",
+        "pii_exposure",
+        "dependency_api_failure",
+        "ai_risk_suite",
+    ],
     duration: str | None = None,
     intensity: str | None = None,
 ) -> dict:

@@ -8,6 +8,25 @@
 </head>
 <body>
   <main class="app-shell">
+    <nav class="flow-steps" aria-label="WARROOM flow steps">
+      <button type="button" class="flow-step active" id="stepBtn1" onclick="goToStep(1)">
+        <span class="flow-step-number">1</span>
+        <span class="flow-step-label">Define Risk</span>
+      </button>
+      <button type="button" class="flow-step" id="stepBtn2" onclick="goToStep(2)">
+        <span class="flow-step-number">2</span>
+        <span class="flow-step-label">Approve Drill</span>
+      </button>
+      <button type="button" class="flow-step" id="stepBtn3" onclick="goToStep(3)">
+        <span class="flow-step-number">3</span>
+        <span class="flow-step-label">Live Test</span>
+      </button>
+      <button type="button" class="flow-step" id="stepBtn4" onclick="goToStep(4)">
+        <span class="flow-step-number">4</span>
+        <span class="flow-step-label">Verdict &amp; Plan</span>
+      </button>
+    </nav>
+
     <section class="screen-panel" id="screen1">
       <div class="landing-hero">
         <div class="landing-copy">
@@ -26,9 +45,14 @@
             <button type="button" class="chip-button" onclick="setFear('Database goes down during checkout')">Database goes down</button>
             <button type="button" class="chip-button" onclick="setFear('Traffic flood hits checkout requests')">Requests flood checkout</button>
             <button type="button" class="chip-button" onclick="setFear('Database gets slow and latency spikes')">Database gets slow</button>
+            <button type="button" class="chip-button" onclick="setFear('What if passwords get exposed in auth flow?')">Passwords exposed</button>
+            <button type="button" class="chip-button" onclick="setFear('What if client data gets exposed?')">Client data exposed</button>
+            <button type="button" class="chip-button" onclick="setFear('What if a third-party API fails?')">Dependency API fails</button>
           </div>
 
           <button type="button" class="primary-button" id="runBtn" onclick="runDrill()">Run Drill</button>
+          <button type="button" class="secondary-button ai-decide-button" id="aiDecideBtn" onclick="runAIDecide()">Let AI Decide &amp; Run Top Risks</button>
+          <p class="ai-decide-helper">Not sure what to test? WARROOM AI will run a short top-vulnerability suite across the app.</p>
         </div>
 
         <aside class="brand-visual-card">
@@ -141,41 +165,18 @@
       </div>
 
       <section class="card battle-progress-card">
-        <div class="battle-progress-header">
-          <div class="section-heading progress-heading">Simulation Progress</div>
-        </div>
+        <div class="section-heading progress-heading">Simulation Progress</div>
         <div class="progress-track progress-track-large">
           <div class="progress-bar" id="progressBar"></div>
         </div>
         <p class="progress-text" id="drillStatusText">Drill in progress...</p>
-        <div class="battle-summary-card">
-          <div class="summary-title">What this means</div>
-          <ul class="battle-summary-list" id="battleSummaryList">
-            <li>The simulation has started and WARROOM is collecting live evidence.</li>
-          </ul>
-        </div>
         <div class="battle-interpretation-card">
-          <div class="section-heading interpretation-heading">Live AI Interpretation</div>
-          <p class="panel-helper interpretation-helper">AI interpretation based on live system signals.</p>
+          <div class="section-heading interpretation-heading">What This Means For You</div>
           <ul class="interpretation-list" id="liveInterpretationList">
             <li class="interpretation-item">WARROOM is preparing the live failure interpretation.</li>
             <li class="interpretation-item">The simulation is collecting system signals and dependency impact.</li>
             <li class="interpretation-item">User-facing effects will appear here as the drill unfolds.</li>
           </ul>
-        </div>
-        <div class="environment-strip">
-          <div class="environment-item">
-            <span class="environment-label">Containers in this demo</span>
-            <strong class="environment-value" id="environmentContainerCount">2 monitored</strong>
-          </div>
-          <div class="environment-item">
-            <span class="environment-label">Critical services</span>
-            <strong class="environment-value" id="environmentCriticalServices">app, database</strong>
-          </div>
-          <div class="environment-item">
-            <span class="environment-label">Control layer</span>
-            <strong class="environment-value" id="environmentControlLayer">backend, MCP</strong>
-          </div>
         </div>
         <button
           type="button"
@@ -248,16 +249,6 @@
             </div>
           </div>
         </section>
-
-        <section class="card battle-section">
-          <div class="section-heading">WARROOM control actions</div>
-          <p class="panel-helper">This shows the key actions WARROOM took through MCP during the simulation.</p>
-          <ol class="mcp-activity-list" id="mcpActivityList">
-            <li class="mcp-activity-item">Initializing failure simulation</li>
-            <li class="mcp-activity-item">Preparing container control</li>
-            <li class="mcp-activity-item">Monitoring database and app state</li>
-          </ol>
-        </section>
       </div>
     </section>
 
@@ -271,18 +262,53 @@
       </button>
       <div class="eyebrow">VERDICT</div>
       <h1>Drill Outcome</h1>
-      <p class="subtitle">Technical diagnosis based on live drill evidence, service metrics, and observed failure signals.</p>
+      <p class="subtitle">Quick summary first. Open details only if you need deeper technical context.</p>
 
       <section class="card verdict-hero">
         <div class="verdict-badge verdict-badge-fail" id="verdictBadge">FAIL</div>
         <div class="verdict-copy">
-          <div class="section-heading">What failed</div>
+          <div class="section-heading">Bottom Line</div>
           <p class="verdict-summary" id="verdictSummary">The system did not handle the dependency failure safely.</p>
         </div>
       </section>
 
       <section class="card">
-        <div class="section-heading">How bad it was</div>
+        <div class="section-heading">What You Need To Know</div>
+        <div class="verdict-signal-grid" id="verdictSignalGrid">
+          <article class="verdict-signal-card signal-risk">
+            <div class="signal-kicker">Risk Signal</div>
+            <h3 class="signal-headline" id="signalRiskHeadline">Resilience failed under this failure scenario.</h3>
+            <p class="signal-copy" id="signalRiskCopy">Checkout reliability is below a safe operating threshold.</p>
+          </article>
+
+          <article class="verdict-signal-card signal-impact">
+            <div class="signal-kicker">User Impact</div>
+            <h3 class="signal-headline" id="signalImpactHeadline">User-facing failures were observed.</h3>
+            <p class="signal-copy" id="signalImpactCopy">This issue is visible to users during checkout requests.</p>
+          </article>
+
+          <article class="verdict-signal-card signal-focus">
+            <div class="signal-kicker">Next Move</div>
+            <h3 class="signal-headline" id="signalFocusHeadline">Prioritize dependency protection now.</h3>
+            <p class="signal-copy" id="signalFocusCopy">Implement fallback and resiliency controls before shipping.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-heading">Priority Actions</div>
+        <ol class="next-actions-list priority-actions-list" id="priorityActionsList">
+          <li>Stabilize the failing dependency path.</li>
+          <li>Add graceful fallback for checkout.</li>
+          <li>Protect with retry and circuit-breaker behavior.</li>
+        </ol>
+      </section>
+
+      <details class="card verdict-details">
+        <summary class="verdict-details-summary">Detailed Analysis (Optional)</summary>
+
+        <section class="verdict-details-block">
+          <div class="section-heading">How bad it was</div>
         <div class="metrics-grid">
           <div class="metric-card">
             <span class="metric-label">Requests working</span>
@@ -301,17 +327,17 @@
             <strong class="metric-value" id="verdictFirstFailure">--</strong>
           </div>
         </div>
-      </section>
+        </section>
 
-      <div class="battle-grid">
-        <section class="card battle-section">
+      <div class="battle-grid verdict-details-block">
+        <section class="battle-section plan-inline-section">
           <div class="section-heading">Why it happened</div>
           <p class="verdict-text" id="likelyCause">
             Checkout requests failed because the database service became unavailable and no graceful fallback existed.
           </p>
         </section>
 
-        <section class="card battle-section">
+        <section class="battle-section plan-inline-section">
           <div class="section-heading">Technical findings</div>
           <ol class="next-actions-list" id="nextActionsList">
             <li>Restore database availability.</li>
@@ -321,14 +347,34 @@
         </section>
       </div>
 
-      <section class="card">
-        <div class="section-heading">Recommended fix</div>
-          <p class="verdict-text" id="suggestedFix">
-            Add retry protection, a circuit breaker, and a graceful fallback path when the database is unreachable.
-          </p>
+      <section class="verdict-details-block">
+        <div class="section-heading">Action Plan</div>
+        <p class="action-plan-framing">Practical next steps from this verdict, designed to be directly actionable.</p>
+        <div class="battle-grid">
+          <section class="battle-section plan-inline-section">
+            <div class="section-heading">Do now</div>
+            <ol class="next-actions-list" id="actionPlanDoNow">
+              <li>Reviewing current drill evidence.</li>
+            </ol>
+          </section>
+
+          <section class="battle-section plan-inline-section">
+            <div class="section-heading">Fix next</div>
+            <ol class="next-actions-list" id="actionPlanFixInCode">
+              <li>Preparing resilient code changes from the current verdict.</li>
+            </ol>
+          </section>
+        </div>
+
+        <section class="battle-section plan-inline-section improve-later-section">
+          <div class="section-heading">Improve later</div>
+          <ol class="next-actions-list" id="actionPlanImproveLater">
+            <li>Capturing follow-up improvements for future drills.</li>
+          </ol>
+        </section>
       </section>
 
-      <section class="card">
+      <section class="verdict-details-block">
         <div class="evidence-header">
           <div class="section-heading evidence-title">Evidence</div>
           <button type="button" class="secondary-button evidence-toggle" id="evidenceToggle" onclick="toggleEvidence()">
@@ -351,45 +397,27 @@
           </div>
         </div>
       </section>
+      </details>
 
-      <div class="actions">
-        <button type="button" class="secondary-button" onclick="showActionPlan()">See Action Plan</button>
-        <button type="button" class="primary-button" id="resetButton" onclick="resetToStart()">Reset &amp; Try Another</button>
-      </div>
-    </section>
-
-    <section class="screen-panel hidden" id="screen5">
-      <div class="eyebrow">ACTION PLAN</div>
-      <h1>Action Plan</h1>
-      <p class="subtitle">Here’s what to do next based on the failure WARROOM observed.</p>
-      <p class="action-plan-framing">You can use the steps below directly as prompt-ready instructions for your AI agents.</p>
-
-      <div class="battle-grid">
-        <section class="card battle-section">
-          <div class="section-heading">Do now</div>
-          <ol class="next-actions-list" id="actionPlanDoNow">
-            <li>Reviewing current drill evidence.</li>
-          </ol>
-        </section>
-
-        <section class="card battle-section">
-          <div class="section-heading">Fix next</div>
-          <ol class="next-actions-list" id="actionPlanFixInCode">
-            <li>Preparing resilient code changes from the current verdict.</li>
-          </ol>
-        </section>
-      </div>
-
-      <section class="card">
-        <div class="section-heading">Improve later</div>
-        <ol class="next-actions-list" id="actionPlanImproveLater">
-          <li>Capturing follow-up improvements for future drills.</li>
-        </ol>
+      <section class="card remediation-card">
+        <div class="section-heading">Fix Prompt Pipeline</div>
+        <p class="remediation-copy">Paste your remediation prompt, apply it to the test environment, then run a verification re-test.</p>
+        <textarea
+          id="remediationPromptInput"
+          class="remediation-textarea"
+          rows="7"
+          placeholder="Paste the fix prompt here..."
+        ></textarea>
+        <div class="actions remediation-actions">
+          <button type="button" class="secondary-button" id="generatePromptButton" onclick="generateFixPrompt()">Generate Fix Prompt</button>
+          <button type="button" class="secondary-button" id="applyPromptButton" onclick="applyFixPrompt()">Apply Prompt</button>
+          <button type="button" class="primary-button" id="verifyRetestButton" onclick="runVerificationRetest()">Run Verification Re-test</button>
+        </div>
+        <div class="remediation-status" id="remediationStatusText">No remediation prompt applied yet.</div>
       </section>
 
       <div class="actions">
-        <button type="button" class="secondary-button" onclick="backToVerdict()">Back to Verdict</button>
-        <button type="button" class="primary-button" onclick="resetToStart()">Reset &amp; Try Another</button>
+        <button type="button" class="primary-button" id="resetButton" onclick="resetToStart()">Reset &amp; Try Another</button>
       </div>
     </section>
   </main>

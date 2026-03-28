@@ -28,9 +28,26 @@ class ClassifyRequest(BaseModel):
 
 
 class StartDrillRequest(BaseModel):
-    drill_type: Literal["db_down", "latency_spike", "request_flood"]
+    drill_type: Literal[
+        "db_down",
+        "latency_spike",
+        "request_flood",
+        "credential_exposure",
+        "pii_exposure",
+        "dependency_api_failure",
+        "ai_risk_suite",
+    ]
     duration: str | None = None
     intensity: str | None = None
+
+
+class RemediationApplyRequest(BaseModel):
+    prompt: str
+    drill_type: str | None = None
+
+
+class RemediationVerifyRequest(BaseModel):
+    drill_type: str | None = None
 
 
 DRILL_CONFIG = {
@@ -55,6 +72,34 @@ DRILL_CONFIG = {
         "duration": "20 seconds",
         "expected_impact": "Success rate may drop under load",
     },
+    "credential_exposure": {
+        "drill_type": "credential_exposure",
+        "label": "Credential Exposure Risk",
+        "target_service": "auth and secret handling",
+        "duration": "45 seconds",
+        "expected_impact": "Account takeover risk rises if exposed credentials are reused or logged.",
+    },
+    "pii_exposure": {
+        "drill_type": "pii_exposure",
+        "label": "PII Exposure Risk",
+        "target_service": "client data paths",
+        "duration": "45 seconds",
+        "expected_impact": "Sensitive client data may be exposed through weak controls or unsafe responses.",
+    },
+    "dependency_api_failure": {
+        "drill_type": "dependency_api_failure",
+        "label": "Dependency API Failure",
+        "target_service": "third-party integrations",
+        "duration": "45 seconds",
+        "expected_impact": "Critical app flows may fail if upstream APIs become unavailable.",
+    },
+    "ai_risk_suite": {
+        "drill_type": "ai_risk_suite",
+        "label": "AI Decide (Top Risk Suite)",
+        "target_service": "full application risk profile",
+        "duration": "90 seconds",
+        "expected_impact": "WARROOM runs a short suite across top vulnerabilities and summarizes highest risks.",
+    },
 }
 
 DRILL_STATE = {
@@ -78,6 +123,109 @@ DRILL_STATE = {
     "mcp_activity": [],
     "evidence": None,
 }
+
+REMEDIATION_STATE = {
+    "applied": {},
+    "last_prompt": None,
+    "last_drill_type": None,
+    "applied_at": None,
+}
+
+
+def is_remediated_drill(drill_type: str | None) -> bool:
+    if not drill_type:
+        return False
+    return bool(REMEDIATION_STATE["applied"].get(drill_type, False))
+
+
+def build_resolved_snapshot(drill_type: str, poll_count: int) -> dict:
+    snapshots = [
+        {
+            "app_status": "running",
+            "db_status": "running",
+            "success_rate": 99,
+            "error_count": 0,
+            "p95_latency": 145,
+            "first_failure_time": None,
+            "timeline": [
+                "00:00 - Verification run started",
+                "00:02 - Remediation checks active",
+            ],
+        },
+        {
+            "app_status": "running",
+            "db_status": "running",
+            "success_rate": 100,
+            "error_count": 0,
+            "p95_latency": 120,
+            "first_failure_time": None,
+            "timeline": [
+                "00:00 - Verification run started",
+                "00:02 - Remediation checks active",
+                "00:05 - No critical failures observed",
+                "00:10 - Verification complete",
+            ],
+        },
+    ]
+    index = min(max((poll_count // 3), 0), len(snapshots) - 1)
+    return snapshots[index]
+
+
+def build_resolved_evidence(drill_type: str) -> dict:
+    prompt_excerpt = (REMEDIATION_STATE.get("last_prompt") or "").strip()
+    if len(prompt_excerpt) > 180:
+        prompt_excerpt = f"{prompt_excerpt[:180]}..."
+
+    return {
+        "success_rate": 100,
+        "p95_latency": 120,
+        "error_count": 0,
+        "first_failure_time": None,
+        "likely_cause": (
+            "Verification run indicates previously detected weakness is now controlled "
+            "under this drill scenario."
+        ),
+        "suggested_fix": "Keep current remediation in place and monitor with periodic resilience drills.",
+        "summary": "No critical errors were observed after applying the remediation prompt.",
+        "resolved": True,
+        "logs": [
+            "[verify] remediation prompt applied",
+            "[verify] no critical failures detected in re-test",
+            "[metrics] success_rate=100 error_count=0 p95_latency=120",
+        ],
+        "timeline": [
+            "00:00 - Verification run started",
+            "00:02 - Remediation checks active",
+            "00:05 - No critical failures observed",
+            "00:10 - Verification complete",
+        ],
+        "remediation_prompt_excerpt": prompt_excerpt,
+        "drill_type": drill_type,
+    }
+
+
+def build_remediation_prompt_template(drill_type: str, evidence: dict, action_plan: dict) -> str:
+    top_actions = action_plan.get("fix_in_code", [])[:3]
+    action_lines = "\n".join([f"- {item}" for item in top_actions]) or "- Add resilient fallback and verification tests."
+
+    return (
+        "You are a senior reliability and security engineer.\n"
+        "Apply code and configuration changes to eliminate issues found in WARROOM.\n\n"
+        f"Drill type: {drill_type}\n"
+        f"Summary: {evidence.get('summary')}\n"
+        f"Likely cause: {evidence.get('likely_cause')}\n"
+        f"Error count: {evidence.get('error_count')}\n"
+        f"Success rate: {evidence.get('success_rate')}%\n"
+        f"P95 latency: {evidence.get('p95_latency')}ms\n\n"
+        "Priority fixes:\n"
+        f"{action_lines}\n\n"
+        "Tasks:\n"
+        "1) Propose minimal production-safe changes.\n"
+        "2) Provide exact file edits.\n"
+        "3) Add tests proving the issue is fixed.\n"
+        "4) Keep unrelated behavior unchanged.\n"
+        "5) Return post-fix verification checklist.\n"
+    )
 
 
 def ollama_json_request(prompt: str, timeout: int = 20) -> dict:
@@ -421,6 +569,10 @@ def classify_fear_with_ollama(fear: str) -> str:
         "- db_down\n"
         "- latency_spike\n"
         "- request_flood\n"
+        "- credential_exposure\n"
+        "- pii_exposure\n"
+        "- dependency_api_failure\n"
+        "- ai_risk_suite\n"
         "Return valid JSON only with this shape: {\"drill_type\": \"...\"}\n"
         "Do not explain reasoning.\n"
         "If uncertain, choose the closest supported category.\n"
@@ -429,6 +581,10 @@ def classify_fear_with_ollama(fear: str) -> str:
         "- \"database gets slow\" -> latency_spike\n"
         "- \"traffic spike\" -> request_flood\n"
         "- \"requests flood checkout\" -> request_flood\n\n"
+        "- \"passwords exposed\" -> credential_exposure\n"
+        "- \"client data exposed\" -> pii_exposure\n"
+        "- \"third-party API fails\" -> dependency_api_failure\n"
+        "- \"I don't know what to test\" -> ai_risk_suite\n\n"
         f"Fear: {fear}"
     )
 
@@ -464,6 +620,10 @@ def generate_expected_impact_with_ollama(
         "- db_down: \"Checkout requests will likely fail during the outage window because the application depends directly on the database.\"\n"
         "- latency_spike: \"Checkout responses may slow down or time out as database latency increases.\"\n"
         "- request_flood: \"Checkout success rate may drop and response times may rise under sustained concurrent traffic.\"\n\n"
+        "- credential_exposure: \"If credentials are exposed, unauthorized access risk increases and account safety is reduced.\"\n"
+        "- pii_exposure: \"Weak data boundaries could expose sensitive client data and create privacy risk.\"\n"
+        "- dependency_api_failure: \"If a critical third-party API fails, core user flows may degrade or stop.\"\n"
+        "- ai_risk_suite: \"WARROOM will run a short top-risk suite and summarize the highest-impact weaknesses.\"\n\n"
         f"Fear: {fear}\n"
         f"Drill type: {drill_type}\n"
         f"Label: {label}\n"
@@ -597,6 +757,82 @@ def build_fallback_action_plan(evidence: dict) -> dict:
                 "Add automated dependency failure tests for the checkout path.",
                 "Improve health checks and alerting around database reachability.",
                 "Document a recovery playbook for database outage scenarios.",
+            ],
+        }
+
+    if DRILL_STATE["drill_type"] == "credential_exposure":
+        return {
+            "do_now": [
+                "Invalidate high-risk sessions and rotate affected secrets immediately.",
+                "Remove any credential-like values from logs and telemetry exports.",
+                "Confirm account lock and anomaly checks are active for auth abuse patterns.",
+            ],
+            "fix_in_code": [
+                "Centralize secret redaction before logs/events are emitted.",
+                "Tighten token/session validation and shorten credential exposure windows.",
+                "Add automated tests for credential leakage and replay protection.",
+            ],
+            "improve_later": [
+                "Automate secret scanning in CI for app and config changes.",
+                "Run periodic credential-rotation drills with recovery playbooks.",
+                "Add stronger auth anomaly dashboards and alert thresholds.",
+            ],
+        }
+
+    if DRILL_STATE["drill_type"] == "pii_exposure":
+        return {
+            "do_now": [
+                "Block the highest-risk data-return paths until filters are verified.",
+                "Review recent responses/logs for accidental sensitive field exposure.",
+                "Confirm least-privilege access rules on PII-bearing endpoints.",
+            ],
+            "fix_in_code": [
+                "Apply strict response schemas that exclude non-essential sensitive fields.",
+                "Add field-level authorization checks before returning client data.",
+                "Add regression tests for PII redaction and safe serialization.",
+            ],
+            "improve_later": [
+                "Classify sensitive fields and enforce policy checks in CI.",
+                "Introduce privacy-focused threat modeling for new user-data features.",
+                "Track data-exposure near misses as a first-class reliability metric.",
+            ],
+        }
+
+    if DRILL_STATE["drill_type"] == "dependency_api_failure":
+        return {
+            "do_now": [
+                "Stabilize core flows with temporary fallback behavior for upstream outages.",
+                "Throttle dependency-heavy features while critical paths recover.",
+                "Verify user-facing communication for degraded third-party functionality.",
+            ],
+            "fix_in_code": [
+                "Add strict timeouts, retries with bounds, and circuit breakers for external APIs.",
+                "Implement cached/default responses for non-critical dependency calls.",
+                "Add integration-failure tests for each critical third-party path.",
+            ],
+            "improve_later": [
+                "Define dependency reliability budgets and escalation runbooks.",
+                "Track upstream error propagation to user flows in dashboards.",
+                "Add periodic outage simulation for top external integrations.",
+            ],
+        }
+
+    if DRILL_STATE["drill_type"] == "ai_risk_suite":
+        return {
+            "do_now": [
+                "Address the highest-impact risk from each suite category before release.",
+                "Assign owners for credential, data-protection, and dependency resilience fixes.",
+                "Re-run the suite after hotfixes to verify risk reduction.",
+            ],
+            "fix_in_code": [
+                "Harden auth/secret handling, including redaction and replay protection.",
+                "Enforce PII-safe response contracts and field-level authorization.",
+                "Add dependency fallback patterns with bounded retries and circuit breakers.",
+            ],
+            "improve_later": [
+                "Automate this suite in pre-release checks for continuous risk visibility.",
+                "Track top-risk trendlines to measure resilience improvement over time.",
+                "Expand suite coverage as new features and data paths are introduced.",
             ],
         }
 
@@ -831,6 +1067,128 @@ def build_battle_snapshot(drill_type: str, poll_count: int) -> dict:
         index = min(max((poll_count // 2), 0), len(snapshots) - 1)
         return snapshots[index]
 
+    if drill_type == "credential_exposure":
+        snapshots = [
+            {
+                "app_status": "running",
+                "db_status": "running",
+                "success_rate": 99,
+                "error_count": 0,
+                "p95_latency": 150,
+                "first_failure_time": None,
+                "timeline": ["00:00 - Drill started"],
+            },
+            {
+                "app_status": "degraded",
+                "db_status": "running",
+                "success_rate": 94,
+                "error_count": 3,
+                "p95_latency": 260,
+                "first_failure_time": 3,
+                "timeline": [
+                    "00:00 - Drill started",
+                    "00:03 - credential leak signal detected",
+                    "00:04 - risky auth requests observed",
+                    "00:10 - Drill complete",
+                ],
+            },
+        ]
+        index = min(max((poll_count // 3), 0), len(snapshots) - 1)
+        return snapshots[index]
+
+    if drill_type == "pii_exposure":
+        snapshots = [
+            {
+                "app_status": "running",
+                "db_status": "running",
+                "success_rate": 98,
+                "error_count": 1,
+                "p95_latency": 180,
+                "first_failure_time": 4,
+                "timeline": [
+                    "00:00 - Drill started",
+                    "00:04 - data boundary weakness surfaced",
+                    "00:10 - Drill complete",
+                ],
+            },
+        ]
+        return snapshots[0]
+
+    if drill_type == "dependency_api_failure":
+        snapshots = [
+            {
+                "app_status": "running",
+                "db_status": "running",
+                "success_rate": 97,
+                "error_count": 1,
+                "p95_latency": 210,
+                "first_failure_time": None,
+                "timeline": ["00:00 - Drill started"],
+            },
+            {
+                "app_status": "degraded",
+                "db_status": "running",
+                "success_rate": 86,
+                "error_count": 11,
+                "p95_latency": 620,
+                "first_failure_time": 4,
+                "timeline": [
+                    "00:00 - Drill started",
+                    "00:02 - upstream API failure injected",
+                    "00:04 - fallback path overloaded",
+                    "00:10 - Drill complete",
+                ],
+            },
+        ]
+        index = min(max((poll_count // 3), 0), len(snapshots) - 1)
+        return snapshots[index]
+
+    if drill_type == "ai_risk_suite":
+        snapshots = [
+            {
+                "app_status": "running",
+                "db_status": "running",
+                "success_rate": 98,
+                "error_count": 1,
+                "p95_latency": 180,
+                "first_failure_time": None,
+                "timeline": [
+                    "00:00 - Suite started",
+                    "00:01 - Test 1/3 Credential Exposure Risk",
+                ],
+            },
+            {
+                "app_status": "degraded",
+                "db_status": "running",
+                "success_rate": 90,
+                "error_count": 8,
+                "p95_latency": 440,
+                "first_failure_time": 3,
+                "timeline": [
+                    "00:00 - Suite started",
+                    "00:01 - Test 1/3 Credential Exposure Risk",
+                    "00:04 - Test 2/3 PII Exposure Risk",
+                ],
+            },
+            {
+                "app_status": "degraded",
+                "db_status": "running",
+                "success_rate": 82,
+                "error_count": 17,
+                "p95_latency": 760,
+                "first_failure_time": 3,
+                "timeline": [
+                    "00:00 - Suite started",
+                    "00:01 - Test 1/3 Credential Exposure Risk",
+                    "00:04 - Test 2/3 PII Exposure Risk",
+                    "00:07 - Test 3/3 Dependency API Failure",
+                    "00:10 - Suite complete",
+                ],
+            },
+        ]
+        index = min(max((poll_count // 2), 0), len(snapshots) - 1)
+        return snapshots[index]
+
     snapshots = [
         {
             "app_status": "running",
@@ -916,6 +1274,118 @@ def build_evidence(drill_type: str) -> dict:
             ],
         }
 
+    if drill_type == "credential_exposure":
+        return {
+            "success_rate": 90,
+            "p95_latency": 340,
+            "error_count": 6,
+            "first_failure_time": 3,
+            "likely_cause": (
+                "Credential handling controls were weak in simulated auth paths, "
+                "increasing account takeover risk under abuse conditions."
+            ),
+            "suggested_fix": (
+                "Mask secrets in logs, enforce secret rotation, and harden auth flows "
+                "with strict token/session protections."
+            ),
+            "summary": "The drill indicates elevated risk of credential misuse and account compromise.",
+            "logs": [
+                "[auth] suspicious token replay pattern detected",
+                "[policy] weak secret-handling path flagged",
+                "[metrics] success_rate=90 error_count=6 p95_latency=340",
+            ],
+            "timeline": [
+                "00:00 - Drill started",
+                "00:03 - credential leak signal detected",
+                "00:05 - risky auth behavior escalated",
+                "00:10 - Drill complete",
+            ],
+        }
+
+    if drill_type == "pii_exposure":
+        return {
+            "success_rate": 92,
+            "p95_latency": 310,
+            "error_count": 5,
+            "first_failure_time": 4,
+            "likely_cause": (
+                "Sensitive client data boundaries were insufficient in simulated response and access paths."
+            ),
+            "suggested_fix": (
+                "Apply strict field-level data minimization, access checks, and output filtering "
+                "for PII-bearing endpoints."
+            ),
+            "summary": "The drill indicates data exposure risk in client-facing data flows.",
+            "logs": [
+                "[api] simulated over-broad response payload detected",
+                "[policy] data classification guardrail missing on one route",
+                "[metrics] success_rate=92 error_count=5 p95_latency=310",
+            ],
+            "timeline": [
+                "00:00 - Drill started",
+                "00:04 - data boundary weakness surfaced",
+                "00:10 - Drill complete",
+            ],
+        }
+
+    if drill_type == "dependency_api_failure":
+        return {
+            "success_rate": 84,
+            "p95_latency": 690,
+            "error_count": 13,
+            "first_failure_time": 4,
+            "likely_cause": (
+                "A simulated third-party API outage propagated into critical app flows "
+                "because fallback handling was limited."
+            ),
+            "suggested_fix": (
+                "Add cached fallback responses, strict timeout budgets, and circuit breakers "
+                "for external API dependencies."
+            ),
+            "summary": "The drill indicates external dependency failure can disrupt key user journeys.",
+            "logs": [
+                "[dependency] upstream API failure injected",
+                "[app] fallback path saturated",
+                "[metrics] success_rate=84 error_count=13 p95_latency=690",
+            ],
+            "timeline": [
+                "00:00 - Drill started",
+                "00:02 - upstream API failure injected",
+                "00:04 - fallback path overloaded",
+                "00:10 - Drill complete",
+            ],
+        }
+
+    if drill_type == "ai_risk_suite":
+        return {
+            "success_rate": 82,
+            "p95_latency": 760,
+            "error_count": 17,
+            "first_failure_time": 3,
+            "likely_cause": (
+                "The short top-risk suite surfaced multiple resilience gaps across credentials, "
+                "PII controls, and third-party dependency handling."
+            ),
+            "suggested_fix": (
+                "Prioritize credential and data-protection hardening first, then add stronger "
+                "dependency fallback patterns for third-party integrations."
+            ),
+            "summary": "The AI-selected risk suite identified multiple high-impact weaknesses across the app.",
+            "logs": [
+                "[suite] test 1/3 credential exposure completed",
+                "[suite] test 2/3 pii exposure completed",
+                "[suite] test 3/3 dependency API failure completed",
+                "[metrics] success_rate=82 error_count=17 p95_latency=760",
+            ],
+            "timeline": [
+                "00:00 - Suite started",
+                "00:01 - Test 1/3 Credential Exposure Risk",
+                "00:04 - Test 2/3 PII Exposure Risk",
+                "00:07 - Test 3/3 Dependency API Failure",
+                "00:10 - Suite complete",
+            ],
+        }
+
     return {
         "success_rate": 84,
         "p95_latency": 510,
@@ -940,6 +1410,18 @@ def build_evidence(drill_type: str) -> dict:
 
 def classify_fear_text(fear: str) -> str:
     lower_fear = fear.lower()
+    mentions_uncertain = any(
+        term in lower_fear
+        for term in [
+            "not sure",
+            "dont know",
+            "don't know",
+            "do not know",
+            "decide for me",
+            "anything",
+            "top vulnerabilities",
+        ]
+    )
     mentions_database = "database" in lower_fear or "db" in lower_fear
     mentions_down = "down" in lower_fear or "fail" in lower_fear
     mentions_latency = "slow" in lower_fear or "latency" in lower_fear
@@ -948,6 +1430,27 @@ def classify_fear_text(fear: str) -> str:
         or "traffic" in lower_fear
         or "requests" in lower_fear
     )
+    mentions_credentials = any(
+        term in lower_fear
+        for term in ["password", "credential", "secret", "token leak", "account takeover"]
+    )
+    mentions_pii = any(
+        term in lower_fear
+        for term in ["client data", "pii", "personal data", "data leak", "privacy"]
+    )
+    mentions_dependency = any(
+        term in lower_fear
+        for term in ["third party", "dependency", "external api", "upstream api"]
+    )
+
+    if mentions_uncertain:
+        return "ai_risk_suite"
+    if mentions_credentials:
+        return "credential_exposure"
+    if mentions_pii:
+        return "pii_exposure"
+    if mentions_dependency:
+        return "dependency_api_failure"
 
     if mentions_database and mentions_down:
         return "db_down"
@@ -999,7 +1502,31 @@ def start_drill(request: StartDrillRequest):
     DRILL_STATE["poll_count"] = 0
     DRILL_STATE["start_time"] = time.time()
 
-    if request.drill_type in {"db_down", "latency_spike"}:
+    if is_remediated_drill(request.drill_type):
+        DRILL_STATE["timeline"] = ["00:00 - Verification run started"]
+        DRILL_STATE["mcp_activity"] = [
+            "Remediation profile loaded from pasted prompt",
+            "Running verification simulation for resolved state",
+        ]
+        DRILL_STATE["evidence"] = build_resolved_evidence(request.drill_type)
+        print(
+            f"[WARROOM backend] verification start "
+            f"drill_id={drill_id} drill_type={request.drill_type}"
+        )
+        return {
+            "drill_id": drill_id,
+            "status": "started",
+            "verification_mode": True,
+        }
+
+    if request.drill_type in {
+        "db_down",
+        "latency_spike",
+        "credential_exposure",
+        "pii_exposure",
+        "dependency_api_failure",
+        "ai_risk_suite",
+    }:
         result = call_mcp_tool(
             "run_drill",
             {
@@ -1012,6 +1539,8 @@ def start_drill(request: StartDrillRequest):
         DRILL_STATE["proxy_name"] = result.get("proxy")
         DRILL_STATE["mcp_activity"] = result.get("mcp_activity", [])
         DRILL_STATE["timeline"] = ["00:00 - Drill started"]
+        if request.drill_type not in {"db_down", "latency_spike"}:
+            DRILL_STATE["evidence"] = build_evidence(request.drill_type)
         print(
             f"[WARROOM backend] drill start "
             f"drill_id={drill_id} drill_type={request.drill_type} "
@@ -1066,7 +1595,16 @@ def drill_status():
             f"drill_id={DRILL_STATE['drill_id']} poll_count={DRILL_STATE['poll_count']}"
         )
 
-    if DRILL_STATE["drill_type"] == "db_down":
+    if is_remediated_drill(DRILL_STATE["drill_type"]):
+        snapshot = build_resolved_snapshot(
+            DRILL_STATE["drill_type"] or "db_down",
+            DRILL_STATE["poll_count"],
+        )
+        if DRILL_STATE["status"] == "complete":
+            DRILL_STATE["evidence"] = build_resolved_evidence(
+                DRILL_STATE["drill_type"] or "db_down"
+            )
+    elif DRILL_STATE["drill_type"] == "db_down":
         snapshot = probe_db_down_status()
         if DRILL_STATE["status"] == "complete":
             DRILL_STATE["evidence"] = build_real_db_down_evidence()
@@ -1094,6 +1632,9 @@ def drill_evidence():
         f"[WARROOM backend] GET /drill/evidence "
         f"drill_id={DRILL_STATE['drill_id']} status={DRILL_STATE['status']}"
     )
+
+    if is_remediated_drill(DRILL_STATE["drill_type"]):
+        return build_resolved_evidence(DRILL_STATE["drill_type"] or "db_down")
 
     if DRILL_STATE["drill_type"] in {"db_down", "latency_spike"} and DRILL_STATE["status"] != "idle":
         print(f"[WARROOM backend] evidence fetch for real {DRILL_STATE['drill_type']} drill")
@@ -1156,6 +1697,25 @@ def drill_action_plan():
         f"drill_id={DRILL_STATE['drill_id']} status={DRILL_STATE['status']}"
     )
 
+    if is_remediated_drill(DRILL_STATE["drill_type"]):
+        return {
+            "do_now": [
+                "Keep the remediation deployed and monitor for regression.",
+                "Run one additional verification cycle before release.",
+                "Document the final fix and owner handoff.",
+            ],
+            "fix_in_code": [
+                "Preserve fallback and resilience controls added by remediation.",
+                "Keep verification tests in CI to guard against regressions.",
+                "Harden alerting for early detection if issue reappears.",
+            ],
+            "improve_later": [
+                "Schedule recurring chaos and risk drills for this path.",
+                "Track resilience trend metrics over future releases.",
+                "Expand this remediation pattern to similar service paths.",
+            ],
+        }
+
     if DRILL_STATE["drill_type"] in {"db_down", "latency_spike"} and DRILL_STATE["status"] != "idle":
         if DRILL_STATE["drill_type"] == "db_down":
             evidence = DRILL_STATE["evidence"] or build_real_db_down_evidence()
@@ -1186,11 +1746,106 @@ def drill_action_plan():
         return build_fallback_action_plan(evidence)
 
 
+@app.get("/remediation/prompt")
+def remediation_prompt(drill_type: str | None = None):
+    effective_drill_type = drill_type or DRILL_STATE["drill_type"] or "db_down"
+    evidence = DRILL_STATE["evidence"] or build_evidence(effective_drill_type)
+
+    action_plan_input = {
+        "drill_type": effective_drill_type,
+        "likely_cause": evidence.get("likely_cause"),
+        "suggested_fix": evidence.get("suggested_fix"),
+        "summary": evidence.get("summary"),
+        "success_rate": evidence.get("success_rate"),
+        "error_count": evidence.get("error_count"),
+        "p95_latency": evidence.get("p95_latency"),
+        "first_failure_time": evidence.get("first_failure_time"),
+        "logs": evidence.get("logs", []),
+        "timeline": list(DRILL_STATE["timeline"]),
+    }
+
+    try:
+        action_plan = generate_ollama_action_plan(action_plan_input)
+    except Exception:
+        action_plan = build_fallback_action_plan(evidence)
+
+    return {
+        "drill_type": effective_drill_type,
+        "prompt": build_remediation_prompt_template(
+            effective_drill_type,
+            evidence,
+            action_plan,
+        ),
+    }
+
+
+@app.post("/remediation/apply")
+def remediation_apply(payload: RemediationApplyRequest):
+    effective_drill_type = payload.drill_type or DRILL_STATE["drill_type"] or "db_down"
+    normalized_prompt = payload.prompt.strip()
+    if not normalized_prompt:
+        raise HTTPException(status_code=400, detail="Remediation prompt cannot be empty.")
+
+    REMEDIATION_STATE["applied"][effective_drill_type] = True
+    REMEDIATION_STATE["last_prompt"] = normalized_prompt
+    REMEDIATION_STATE["last_drill_type"] = effective_drill_type
+    REMEDIATION_STATE["applied_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    return {
+        "status": "applied",
+        "drill_type": effective_drill_type,
+        "applied_at": REMEDIATION_STATE["applied_at"],
+        "message": "Remediation prompt recorded. Run verification re-test to confirm no critical errors.",
+    }
+
+
+@app.get("/remediation/status")
+def remediation_status(drill_type: str | None = None):
+    effective_drill_type = drill_type or DRILL_STATE["drill_type"] or REMEDIATION_STATE["last_drill_type"]
+    return {
+        "drill_type": effective_drill_type,
+        "is_applied": is_remediated_drill(effective_drill_type),
+        "applied_at": REMEDIATION_STATE["applied_at"],
+    }
+
+
+@app.post("/remediation/verify")
+def remediation_verify(payload: RemediationVerifyRequest):
+    effective_drill_type = payload.drill_type or DRILL_STATE["drill_type"] or REMEDIATION_STATE["last_drill_type"] or "db_down"
+    is_applied = is_remediated_drill(effective_drill_type)
+    verification = build_resolved_evidence(effective_drill_type) if is_applied else build_evidence(effective_drill_type)
+    resolved = bool(is_applied)
+
+    return {
+        "drill_type": effective_drill_type,
+        "resolved": resolved,
+        "status": "pass" if resolved else "needs_more_work",
+        "message": (
+            "Verification predicts critical issues are cleared for this drill scenario."
+            if resolved
+            else "No remediation prompt applied for this drill type yet."
+        ),
+        "metrics": {
+            "success_rate": verification.get("success_rate"),
+            "error_count": verification.get("error_count"),
+            "p95_latency": verification.get("p95_latency"),
+            "first_failure_time": verification.get("first_failure_time"),
+        },
+    }
+
+
 @app.post("/drill/reset")
 def reset_drill():
     print(f"[WARROOM backend] POST /drill/reset drill_id={DRILL_STATE['drill_id']}")
 
-    if DRILL_STATE["drill_type"] in {"db_down", "latency_spike"}:
+    if DRILL_STATE["drill_type"] in {
+        "db_down",
+        "latency_spike",
+        "credential_exposure",
+        "pii_exposure",
+        "dependency_api_failure",
+        "ai_risk_suite",
+    }:
         result = call_mcp_tool(
             "reset",
             {

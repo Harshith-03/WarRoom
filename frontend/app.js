@@ -16,6 +16,30 @@ const DRILL_CONFIG = {
     targetService: "warroom-app",
     duration: "20 seconds",
     impact: "Success rate may drop under load"
+  },
+  credential_exposure: {
+    label: "Credential Exposure Risk",
+    targetService: "auth and secret handling",
+    duration: "45 seconds",
+    impact: "Account takeover risk rises if credentials are exposed or reused"
+  },
+  pii_exposure: {
+    label: "PII Exposure Risk",
+    targetService: "client data paths",
+    duration: "45 seconds",
+    impact: "Sensitive client data may leak through weak response controls"
+  },
+  dependency_api_failure: {
+    label: "Dependency API Failure",
+    targetService: "third-party integrations",
+    duration: "45 seconds",
+    impact: "Critical app flows can degrade when upstream APIs fail"
+  },
+  ai_risk_suite: {
+    label: "AI Decide (Top Risk Suite)",
+    targetService: "full application risk profile",
+    duration: "90 seconds",
+    impact: "Runs a short suite across top vulnerabilities and summarizes highest risks"
   }
 };
 
@@ -117,6 +141,79 @@ let battleCompleted = false;
 let aiInterpretationLines = [];
 let aiInterpretationRequestInFlight = false;
 let interpretationRefreshCounter = 0;
+let maxUnlockedStep = 1;
+
+const STEP_SCREEN_MAP = {
+  1: "screen1",
+  2: "screen2",
+  3: "screen3",
+  4: "screen4"
+};
+
+function setMaxUnlockedStep(step) {
+  maxUnlockedStep = Math.max(maxUnlockedStep, Math.min(step, 4));
+}
+
+function getStepFromScreenId(screenId) {
+  const entry = Object.entries(STEP_SCREEN_MAP).find(([, id]) => id === screenId);
+  return entry ? Number(entry[0]) : 1;
+}
+
+function updateStepIndicator(activeStep) {
+  for (let step = 1; step <= 4; step += 1) {
+    const button = document.getElementById(`stepBtn${step}`);
+    if (!button) {
+      continue;
+    }
+
+    const isUnlocked = step <= maxUnlockedStep;
+    const isActive = step === activeStep;
+
+    button.classList.toggle("active", isActive);
+    button.classList.toggle("completed", !isActive && step < activeStep && step <= maxUnlockedStep);
+    button.classList.toggle("locked", !isUnlocked);
+    button.disabled = !isUnlocked;
+  }
+}
+
+function goToStep(step) {
+  if (step > maxUnlockedStep) {
+    return;
+  }
+
+  if (step === 1) {
+    showScreen("screen1");
+    return;
+  }
+
+  if (step === 2) {
+    if (!currentPlan) {
+      return;
+    }
+    showScreen("screen2");
+    return;
+  }
+
+  if (step === 3) {
+    if (!currentDrillId && !battleCompleted) {
+      return;
+    }
+    showScreen("screen3");
+    renderBattleState();
+    return;
+  }
+
+  if (step === 4) {
+    if (!battleCompleted && !verdictState) {
+      return;
+    }
+    if (!verdictState) {
+      void showVerdictScreen();
+      return;
+    }
+    showScreen("screen4");
+  }
+}
 
 function cloneBattleState(state) {
   return {
@@ -129,6 +226,22 @@ function cloneBattleState(state) {
 function setFear(text) {
   document.getElementById("fearInput").value = text;
   console.log("[WARROOM] fear preset selected:", text);
+}
+
+function runAIDecide() {
+  const plan = {
+    drillType: "ai_risk_suite",
+    label: DRILL_CONFIG.ai_risk_suite.label,
+    targetService: DRILL_CONFIG.ai_risk_suite.targetService,
+    duration: DRILL_CONFIG.ai_risk_suite.duration,
+    impact: DRILL_CONFIG.ai_risk_suite.impact
+  };
+
+  currentPlan = plan;
+  setMaxUnlockedStep(2);
+  populateApprovalScreen(plan);
+  showScreen("screen2");
+  console.log("[WARROOM] AI decide mode selected");
 }
 
 async function classifyFear(fear) {
@@ -191,6 +304,9 @@ function showScreen(screenToShowId) {
   screens.forEach((screen) => {
     screen.classList.toggle("hidden", screen.id !== screenToShowId);
   });
+
+  const step = getStepFromScreenId(screenToShowId);
+  updateStepIndicator(step);
 
   console.log("[WARROOM] screen transition:", screenToShowId);
 }
@@ -305,6 +421,7 @@ async function runDrill() {
   try {
     const plan = await classifyFear(fear);
     currentPlan = plan;
+    setMaxUnlockedStep(2);
 
     populateApprovalScreen(plan);
     showScreen("screen2");
@@ -519,6 +636,70 @@ function generateLiveNarration() {
     } else {
       lines.push("If latency continues rising, slow responses may turn into timeouts or failed purchases.");
     }
+  } else if (drillType === "credential_exposure") {
+    lines.push("WARROOM is simulating credential exposure patterns across authentication and secret handling.");
+
+    if (errorCountValue > 0 || hasFirstFailure) {
+      lines.push("The current posture suggests account misuse risk if leaked credentials are replayed.");
+    } else {
+      lines.push("No immediate customer-visible failure yet, but identity safety risk is elevated.");
+    }
+
+    lines.push("This test focuses on reducing takeover risk before attackers can exploit weak secret controls.");
+
+    if (battleCompleted) {
+      lines.push("WARROOM has captured enough evidence to prioritize credential protection fixes.");
+    } else {
+      lines.push("WARROOM is still collecting evidence from authentication behavior and simulated abuse signals.");
+    }
+  } else if (drillType === "pii_exposure") {
+    lines.push("WARROOM is simulating data exposure pressure on client-data paths.");
+
+    if (errorCountValue > 0 || hasFirstFailure) {
+      lines.push("Weak data boundaries are now visible and could expose sensitive client information.");
+    } else {
+      lines.push("Risk remains latent, but data boundary weaknesses can become user-impacting quickly.");
+    }
+
+    lines.push("This drill validates whether data minimization and access controls are strong enough.");
+
+    if (battleCompleted) {
+      lines.push("WARROOM has identified concrete points where privacy protections should be tightened.");
+    } else {
+      lines.push("WARROOM is still mapping where sensitive fields could leak through responses.");
+    }
+  } else if (drillType === "dependency_api_failure") {
+    lines.push("WARROOM is simulating a third-party API outage in a critical app path.");
+
+    if (errorCountValue > 0 || hasFirstFailure) {
+      lines.push("User flow reliability is dropping because fallback behavior is not absorbing upstream failure.");
+    } else {
+      lines.push("The integration is under stress and fallback quality is being validated.");
+    }
+
+    lines.push("This test shows how quickly external dependency failures can reach users.");
+
+    if (battleCompleted) {
+      lines.push("WARROOM has gathered evidence to prioritize timeout, retry, and fallback improvements.");
+    } else {
+      lines.push("WARROOM is still observing dependency error propagation through the app.");
+    }
+  } else if (drillType === "ai_risk_suite") {
+    lines.push("WARROOM AI selected a short top-risk suite for full-app vulnerability coverage.");
+
+    if (errorCountValue > 0 || hasFirstFailure) {
+      lines.push("The suite is already surfacing real user-impact patterns across multiple risk categories.");
+    } else {
+      lines.push("Suite execution is in progress across credential, data, and dependency risk scenarios.");
+    }
+
+    lines.push("This mode is designed for teams who are unsure what to test first.");
+
+    if (battleCompleted) {
+      lines.push("WARROOM now has a ranked risk summary and prioritized actions for the app.");
+    } else {
+      lines.push("WARROOM is collecting cross-scenario evidence to produce a prioritized final verdict.");
+    }
   } else {
     lines.push("WARROOM is pushing sustained traffic into the checkout path and watching how the system absorbs load.");
 
@@ -587,27 +768,16 @@ function maybeRefreshAiInterpretation(force = false) {
     });
 }
 
-function renderBattleSummary() {
-  const battleSummaryList = document.getElementById("battleSummaryList");
-  const lines = buildBattleSummaryLines();
-
-  battleSummaryList.innerHTML = lines
-    .map((line) => `<li>${line}</li>`)
-    .join("");
-}
-
 function renderLiveInterpretation() {
   const interpretationList = document.getElementById("liveInterpretationList");
+  if (!interpretationList) {
+    return;
+  }
   const lines = aiInterpretationLines.length > 0 ? aiInterpretationLines : generateLiveNarration();
 
   interpretationList.innerHTML = lines
     .map((line) => `<li class="interpretation-item">${line}</li>`)
     .join("");
-}
-
-function renderEnvironmentInfo() {
-  const serviceCount = document.querySelectorAll(".service-card").length;
-  document.getElementById("environmentContainerCount").textContent = `${serviceCount} monitored`;
 }
 
 function getAppServiceCopy(status) {
@@ -673,29 +843,6 @@ function renderTimeline(events) {
     .join("");
 }
 
-function renderMcpActivity(items) {
-  const mcpActivityList = document.getElementById("mcpActivityList");
-  const normalizedItems = [...items]
-    .reverse()
-    .map((item) => item.replace(/^MCP /, ""));
-  const fallbackItems = currentPlan?.drillType === "db_down"
-    ? [
-        "Initializing failure simulation",
-        "Preparing container control",
-        "Monitoring database and app state"
-      ]
-    : [
-        "Monitoring system behavior",
-        "Collecting live metrics",
-        "Analyzing service health"
-      ];
-  const renderedItems = normalizedItems.length ? normalizedItems : fallbackItems;
-
-  mcpActivityList.innerHTML = renderedItems
-    .map((item) => `<li class="mcp-activity-item">${item}</li>`)
-    .join("");
-}
-
 function renderBattleState() {
   setStatusAppearance("app", battleState.appStatus);
   setStatusAppearance("db", battleState.dbStatus);
@@ -718,10 +865,7 @@ function renderBattleState() {
   );
 
   renderTimeline(battleState.timeline);
-  renderMcpActivity(battleState.mcpActivity);
-  renderBattleSummary();
   renderLiveInterpretation();
-  renderEnvironmentInfo();
 }
 
 function applyDrillStatus(statusData) {
@@ -803,6 +947,136 @@ async function resetDrillRequest() {
   return data;
 }
 
+async function fetchRemediationPrompt(drillType) {
+  const response = await fetch(`http://127.0.0.1:8000/remediation/prompt?drill_type=${encodeURIComponent(drillType)}`);
+
+  if (!response.ok) {
+    throw new Error(`Remediation prompt request failed with status ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function applyRemediationPrompt(promptText, drillType) {
+  const response = await fetch("http://127.0.0.1:8000/remediation/apply", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      prompt: promptText,
+      drill_type: drillType
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Remediation apply request failed with status ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function verifyRemediation(drillType) {
+  const response = await fetch("http://127.0.0.1:8000/remediation/verify", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      drill_type: drillType
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Remediation verify request failed with status ${response.status}`);
+  }
+
+  return response.json();
+}
+
+function setRemediationStatusText(message, isResolved = false) {
+  const status = document.getElementById("remediationStatusText");
+  if (!status) {
+    return;
+  }
+
+  status.textContent = message;
+  status.classList.toggle("remediation-status-pass", isResolved);
+}
+
+async function generateFixPrompt() {
+  if (!currentPlan) {
+    alert("No drill context available. Run a drill first.");
+    return;
+  }
+
+  try {
+    const data = await fetchRemediationPrompt(currentPlan.drillType);
+    const textarea = document.getElementById("remediationPromptInput");
+    textarea.value = data.prompt || "";
+    setRemediationStatusText("Fix prompt generated. Review and apply when ready.");
+  } catch (error) {
+    console.error("[WARROOM] remediation prompt fetch failed", error);
+    alert("Could not generate remediation prompt. Please make sure the backend is running.");
+  }
+}
+
+async function applyFixPrompt() {
+  if (!currentPlan) {
+    alert("No drill context available. Run a drill first.");
+    return;
+  }
+
+  const textarea = document.getElementById("remediationPromptInput");
+  const promptText = textarea.value.trim();
+
+  if (!promptText) {
+    alert("Paste a remediation prompt first.");
+    return;
+  }
+
+  try {
+    const result = await applyRemediationPrompt(promptText, currentPlan.drillType);
+    setRemediationStatusText(`Prompt applied for ${result.drill_type}. Run verification re-test.`);
+  } catch (error) {
+    console.error("[WARROOM] remediation apply failed", error);
+    alert("Could not apply remediation prompt. Please make sure the backend is running.");
+  }
+}
+
+async function runVerificationRetest() {
+  if (!currentPlan) {
+    alert("No drill context available. Run a drill first.");
+    return;
+  }
+
+  try {
+    const verification = await verifyRemediation(currentPlan.drillType);
+
+    if (!verification.resolved) {
+      setRemediationStatusText("Verification blocked: apply a remediation prompt first.");
+      alert("Apply a remediation prompt before running verification re-test.");
+      return;
+    }
+
+    setRemediationStatusText("Verification passed. Re-running the drill with remediation profile.", true);
+
+    const selectedDuration = document.getElementById("durationSelect").value;
+    const selectedIntensity = document.getElementById("intensitySelect").value;
+
+    const data = await startDrillRequest(
+      currentPlan.drillType,
+      selectedDuration,
+      selectedIntensity
+    );
+    currentDrillId = data.drill_id;
+    startDrillStatusPolling();
+  } catch (error) {
+    console.error("[WARROOM] remediation verification failed", error);
+    alert("Could not run verification re-test. Please make sure backend and MCP are running.");
+  }
+}
+
 function setResetButtonState(isBusy) {
   const resetButton = document.getElementById("resetButton");
   if (!resetButton) {
@@ -820,7 +1094,7 @@ function buildVerdictState(evidenceData) {
     : `00:${String(evidenceData.first_failure_time).padStart(2, "0")}`;
 
   return {
-    result: "FAIL",
+    result: evidenceData.resolved ? "PASS" : "FAIL",
     summary: evidenceData.summary || "The system did not handle the dependency failure safely.",
     successRate: `${evidenceData.success_rate}%`,
     p95Latency: `${evidenceData.p95_latency}ms`,
@@ -851,17 +1125,75 @@ function buildTechnicalFindings(evidenceData, firstFailure) {
 
   if (reasoningText.includes("database") || currentPlan?.drillType === "db_down") {
     return [
-      `Checkout impact became visible at ${firstFailure}, confirming a hard dependency on the database path.`,
-      `The system dropped to ${evidenceData.success_rate}% successful requests while p95 latency climbed to ${evidenceData.p95_latency}ms.`,
-      "Observed logs and timeline events show the application did not degrade gracefully after database reachability failed."
+      `Impact visible at ${firstFailure}.`,
+      `${100 - evidenceData.success_rate}% of sampled requests failed during the drill.`,
+      "Checkout depends on a single database path with no graceful fallback."
     ];
   }
 
   return [
-    `The drill produced ${evidenceData.error_count} failing requests with p95 latency at ${evidenceData.p95_latency}ms.`,
-    `The first user-visible error appeared at ${firstFailure}, showing the impact reached the user flow quickly.`,
-    "Timeline and log evidence indicate the application path weakened under dependency stress before recovery safeguards took effect."
+    `${evidenceData.error_count} request failures were observed.`,
+    `First user-visible error appeared at ${firstFailure}.`,
+    "The critical user flow degraded under dependency stress."
   ];
+}
+
+function buildVerdictSignals() {
+  if (!verdictState) {
+    return null;
+  }
+
+  const successRateValue = Number.parseInt(verdictState.successRate, 10);
+  const failureRate = Number.isNaN(successRateValue)
+    ? "high"
+    : `${Math.max(0, 100 - successRateValue)}%`;
+
+  return {
+    risk: {
+      headline: `${verdictState.result} resilience check`,
+      copy: `Checkout reliability is below safe threshold in this drill scenario.`
+    },
+    impact: {
+      headline: `${failureRate} sampled requests failed`,
+      copy: `First visible error reached users at ${verdictState.firstFailure}.`
+    },
+    focus: {
+      headline: "Protect the checkout dependency path",
+      copy: "Implement graceful fallback, retries, and circuit-breaker safety controls."
+    }
+  };
+}
+
+function buildPriorityActions() {
+  const fallback = [
+    "Stabilize the failing dependency path.",
+    "Add graceful fallback behavior for checkout.",
+    "Add retry and circuit-breaker protection."
+  ];
+
+  if (!actionPlanState) {
+    return fallback;
+  }
+
+  const raw = [
+    ...(actionPlanState.do_now || []),
+    ...(actionPlanState.fix_in_code || []),
+    ...(actionPlanState.improve_later || [])
+  ]
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean);
+
+  const deduped = [];
+  const seen = new Set();
+  for (const item of raw) {
+    const key = item.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(item);
+    }
+  }
+
+  return deduped.slice(0, 3).length ? deduped.slice(0, 3) : fallback;
 }
 
 function populateVerdictScreen() {
@@ -876,10 +1208,25 @@ function populateVerdictScreen() {
   document.getElementById("verdictErrorCount").textContent = verdictState.errorCount;
   document.getElementById("verdictFirstFailure").textContent = verdictState.firstFailure;
   document.getElementById("likelyCause").textContent = verdictState.likelyCause;
-  document.getElementById("suggestedFix").textContent = verdictState.suggestedFix;
   document.getElementById("nextActionsList").innerHTML = verdictState.technicalFindings
     .map((finding) => `<li>${finding}</li>`)
     .join("");
+
+  const signals = buildVerdictSignals();
+  if (signals) {
+    document.getElementById("signalRiskHeadline").textContent = signals.risk.headline;
+    document.getElementById("signalRiskCopy").textContent = signals.risk.copy;
+    document.getElementById("signalImpactHeadline").textContent = signals.impact.headline;
+    document.getElementById("signalImpactCopy").textContent = signals.impact.copy;
+    document.getElementById("signalFocusHeadline").textContent = signals.focus.headline;
+    document.getElementById("signalFocusCopy").textContent = signals.focus.copy;
+  }
+
+  const priorityActions = buildPriorityActions();
+  document.getElementById("priorityActionsList").innerHTML = priorityActions
+    .map((action) => `<li>${action}</li>`)
+    .join("");
+
   document.getElementById("evidenceTimeline").textContent = verdictState.evidence.timelineLines.join("\n");
   document.getElementById("evidenceLogs").textContent = verdictState.evidence.logLines.join("\n");
   document.getElementById("evidenceMetrics").textContent = verdictState.evidence.metricsSnapshot.join("\n");
@@ -911,9 +1258,15 @@ async function showVerdictScreen() {
 
   try {
     console.log("[WARROOM] verdict transition triggered");
-    const evidenceData = await fetchDrillEvidence();
+    const [evidenceData, actionPlanData] = await Promise.all([
+      fetchDrillEvidence(),
+      fetchActionPlan()
+    ]);
     verdictState = buildVerdictState(evidenceData);
+    actionPlanState = actionPlanData;
     populateVerdictScreen();
+    populateActionPlanScreen();
+    setMaxUnlockedStep(4);
     showScreen("screen4");
     console.log("[WARROOM] transition to verdict screen");
   } catch (error) {
@@ -996,6 +1349,7 @@ function startDrillStatusPolling() {
   }
 
   resetBattleState();
+  setMaxUnlockedStep(3);
   showScreen("screen3");
   renderBattleState();
 
@@ -1023,22 +1377,6 @@ function backToSimulation() {
   console.log("[WARROOM] back to simulation clicked");
   showScreen("screen3");
   renderBattleState();
-}
-
-async function showActionPlan() {
-  try {
-    const data = await fetchActionPlan();
-    actionPlanState = data;
-    populateActionPlanScreen();
-    showScreen("screen5");
-  } catch (error) {
-    console.error("[WARROOM] action plan fetch failure", error);
-    alert("Could not load action plan. Please make sure the backend is running.");
-  }
-}
-
-function backToVerdict() {
-  showScreen("screen4");
 }
 
 async function approveRun() {
@@ -1086,6 +1424,8 @@ async function approveRun() {
 function abortDrill() {
   console.log("[WARROOM] abort clicked, stopping drill");
   currentDrillId = null;
+  currentPlan = null;
+  maxUnlockedStep = 1;
   resetBattleState();
   showScreen("screen1");
 }
@@ -1114,7 +1454,13 @@ async function resetToStart() {
     await resetDrillRequest();
     currentDrillId = null;
     currentPlan = null;
+    maxUnlockedStep = 1;
     resetBattleState();
+    const remediationPromptInput = document.getElementById("remediationPromptInput");
+    if (remediationPromptInput) {
+      remediationPromptInput.value = "";
+    }
+    setRemediationStatusText("No remediation prompt applied yet.");
     showScreen("screen1");
     console.log("[WARROOM] UI returned to screen 1");
   } catch (error) {
@@ -1136,6 +1482,8 @@ document.addEventListener("DOMContentLoaded", () => {
     button.addEventListener("click", () => setIntensityOption(button.dataset.intensity));
   });
   setResetButtonState(false);
+  setRemediationStatusText("No remediation prompt applied yet.");
+  updateStepIndicator(1);
   resetBattleState();
   showScreen("screen1");
   console.log("[WARROOM] initialized");
